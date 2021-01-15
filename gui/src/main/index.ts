@@ -524,7 +524,7 @@ class ApplicationMain {
 
     // fetch settings
     try {
-      await this.setSettings(await this.daemonRpc.getSettings());
+      this.setSettings(await this.daemonRpc.getSettings());
     } catch (error) {
       log.error(`Failed to fetch settings: ${error.message}`);
 
@@ -628,7 +628,7 @@ class ApplicationMain {
         if ('tunnelState' in daemonEvent) {
           this.setTunnelState(daemonEvent.tunnelState);
         } else if ('settings' in daemonEvent) {
-          consumePromise(this.setSettings(daemonEvent.settings));
+          this.setSettings(daemonEvent.settings);
         } else if ('relayList' in daemonEvent) {
           this.setRelays(
             daemonEvent.relayList,
@@ -715,7 +715,7 @@ class ApplicationMain {
     }
   }
 
-  private async setSettings(newSettings: ISettings) {
+  private setSettings(newSettings: ISettings) {
     const oldSettings = this.settings;
     this.settings = newSettings;
 
