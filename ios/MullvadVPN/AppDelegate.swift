@@ -52,12 +52,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         RelayCache.shared.updateRelays()
 
         // Load tunnels
-        let accountToken = Account.shared.token
-        TunnelManager.shared.loadTunnel(accountToken: accountToken) { (result) in
+        TunnelManager.shared.loadTunnel(accountToken: Account.shared.token) { (result) in
             DispatchQueue.main.async {
                 if case .failure(let error) = result {
                     fatalError(error.displayChain(message: "Failed to load the tunnel for account"))
                 }
+
+                self.rootContainer = RootContainerViewController()
+                self.rootContainer?.delegate = self
+                self.window?.rootViewController = self.rootContainer
 
                 switch UIDevice.current.userInterfaceIdiom {
                 case .pad:
@@ -85,93 +88,111 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     private func startPadInterfaceFlow() {
-        let rootViewController = RootContainerViewController()
-        rootViewController.delegate = self
-
-        rootViewController.setViewControllers([ConnectViewController()], animated: false)
-
-        self.window?.rootViewController = rootViewController
-        self.rootContainer = rootViewController
+        self.rootContainer?.setViewControllers([ConnectViewController()], animated: false)
 
         if !Account.shared.isAgreedToTermsOfService {
-            let consentViewController = ConsentViewController()
-            consentViewController.preferredContentSize = CGSize(width: 480, height: 600)
-            consentViewController.modalPresentationStyle = .formSheet
-            if #available(iOS 13.0, *) {
-                consentViewController.isModalInPresentation = true
-            }
-            consentViewController.completionHandler = { [weak self] (viewController) in
+            let consentViewController = self.makeConsentController { [weak self] (viewController) in
                 guard let self = self else { return }
 
-                Account.shared.agreeToTermsOfService()
-                
                 if Account.shared.isLoggedIn {
                     viewController.dismiss(animated: true) {
-                        self.showAccountControllerIfExpired()
+                        self.showAccountSettingsControllerIfAccountExpired()
                     }
                 } else {
                     viewController.dismiss(animated: true) {
-                        rootViewController.present(self.makeLoginControllerForPad(), animated: true)
+                        self.rootContainer?.present(self.makeLoginController(), animated: true)
                     }
                 }
             }
-            rootViewController.present(consentViewController, animated: true)
+            self.rootContainer?.present(consentViewController, animated: true)
         } else if !Account.shared.isLoggedIn {
-            rootViewController.present(makeLoginControllerForPad(), animated: true)
-        }
-    }
-
-    private func makeLoginControllerForPad() -> LoginViewController {
-        let controller = LoginViewController()
-        controller.delegate = self
-        controller.preferredContentSize = CGSize(width: 320, height: 400)
-        controller.modalPresentationStyle = .formSheet
-        if #available(iOS 13.0, *) {
-            controller.isModalInPresentation = true
-        }
-        return controller
-    }
-
-    private func showAccountControllerIfExpired() {
-        if let accountExpiry = Account.shared.expiry, AccountExpiry(date: accountExpiry).isExpired {
-            rootContainer?.showSettings(navigateTo: .account, animated: true)
+            self.rootContainer?.present(makeLoginController(), animated: true)
         }
     }
 
     private func startPhoneInterfaceFlow() {
-        let rootViewController = RootContainerViewController()
-        rootViewController.delegate = self
+        let showNextController = { [weak self] (_ animated: Bool) in
+            guard let self = self else { return }
 
-        let showMainController = { (_ animated: Bool) in
-            let loginViewController = LoginViewController()
-            loginViewController.delegate = self
-
+            let loginViewController = self.makeLoginController()
             var viewControllers: [UIViewController] = [loginViewController]
 
             if Account.shared.isLoggedIn {
                 viewControllers.append(ConnectViewController())
             }
 
-            rootViewController.setViewControllers(viewControllers, animated: animated) {
-                self.showAccountControllerIfExpired()
+            self.rootContainer?.setViewControllers(viewControllers, animated: animated) {
+                self.showAccountSettingsControllerIfAccountExpired()
             }
         }
 
         if Account.shared.isAgreedToTermsOfService {
-            showMainController(false)
+            showNextController(false)
         } else {
-            let consentViewController = ConsentViewController()
-            consentViewController.completionHandler = { _ in
-                Account.shared.agreeToTermsOfService()
-
-                showMainController(true)
+            let consentViewController = self.makeConsentController { (consentController) in
+                showNextController(true)
             }
 
-            rootViewController.setViewControllers([consentViewController], animated: false)
+            self.rootContainer?.setViewControllers([consentViewController], animated: false)
+        }
+    }
+
+    private func makeConsentController(completion: @escaping (UIViewController) -> Void) -> ConsentViewController {
+        let consentViewController = ConsentViewController()
+
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            consentViewController.preferredContentSize = CGSize(width: 480, height: 600)
+            consentViewController.modalPresentationStyle = .formSheet
+            if #available(iOS 13.0, *) {
+                consentViewController.isModalInPresentation = true
+            }
         }
 
-        self.window?.rootViewController = rootViewController
-        self.rootContainer = rootViewController
+        consentViewController.completionHandler = { (consentViewController) in
+            Account.shared.agreeToTermsOfService()
+            completion(consentViewController)
+        }
+
+        return consentViewController
+    }
+
+    private func makeLoginController() -> LoginViewController {
+        let controller = LoginViewController()
+        controller.delegate = self
+
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            controller.preferredContentSize = CGSize(width: 320, height: 400)
+            controller.modalPresentationStyle = .formSheet
+            if #available(iOS 13.0, *) {
+                controller.isModalInPresentation = true
+            }
+        }
+
+        return controller
+    }
+
+    private func makeSettingsNavigationController(route: SettingsNavigationRoute?) -> SettingsNavigationController {
+        let navController = SettingsNavigationController()
+        navController.settingsDelegate = self
+
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            navController.preferredContentSize = CGSize(width: 480, height: 568)
+            navController.modalPresentationStyle = .formSheet
+        }
+
+        navController.presentationController?.delegate = navController
+
+        if let route = route {
+            navController.navigate(to: route, animated: false)
+        }
+
+        return navController
+    }
+
+    private func showAccountSettingsControllerIfAccountExpired() {
+        guard let accountExpiry = Account.shared.expiry, AccountExpiry(date: accountExpiry).isExpired else { return }
+
+        rootContainer?.showSettings(navigateTo: .account, animated: true)
     }
 
     private func startPaymentQueueHandling() {
@@ -187,19 +208,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 extension AppDelegate: RootContainerViewControllerDelegate {
 
     func rootContainerViewControllerShouldShowSettings(_ controller: RootContainerViewController, navigateTo route: SettingsNavigationRoute?, animated: Bool) {
-        let navController = SettingsNavigationController()
-        navController.settingsDelegate = self
+        let navController = makeSettingsNavigationController(route: route)
 
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            navController.preferredContentSize = CGSize(width: 480, height: 568)
-            navController.modalPresentationStyle = .formSheet
-        }
-
-        if let route = route {
-            navController.navigate(to: route, animated: animated)
-        }
-
-        navController.presentationController?.delegate = navController
         controller.present(navController, animated: animated)
     }
 
@@ -210,7 +220,7 @@ extension AppDelegate: RootContainerViewControllerDelegate {
         case .phone:
             return [.portrait]
         default:
-            fatalError("Not supported")
+            fatalError()
         }
     }
 }
@@ -221,11 +231,11 @@ extension AppDelegate: LoginViewControllerDelegate {
         switch UIDevice.current.userInterfaceIdiom {
         case .phone:
             rootContainer?.pushViewController(ConnectViewController(), animated: true) {
-                self.showAccountControllerIfExpired()
+                self.showAccountSettingsControllerIfAccountExpired()
             }
         case .pad:
             controller.dismiss(animated: true) {
-                self.showAccountControllerIfExpired()
+                self.showAccountSettingsControllerIfAccountExpired()
             }
         default:
             fatalError()
@@ -251,7 +261,7 @@ extension AppDelegate: SettingsNavigationControllerDelegate {
         case .pad:
             controller.dismiss(animated: true) {
                 if case .userLoggedOut = reason {
-                    self.rootContainer?.present(self.makeLoginControllerForPad(), animated: true)
+                    self.rootContainer?.present(self.makeLoginController(), animated: true)
                 }
             }
 
