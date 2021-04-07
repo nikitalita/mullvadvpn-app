@@ -25,7 +25,7 @@ protocol ConnectViewControllerDelegate: class {
     func connectViewControllerShouldReconnectTunnel(_ controller: ConnectViewController)
 }
 
-class ConnectViewController: UIViewController, RootContainment, TunnelObserver, AccountObserver, MKMapViewDelegate
+class ConnectViewController: UIViewController, RootContainment, TunnelObserver, MKMapViewDelegate
 {
     weak var delegate: ConnectViewControllerDelegate?
 
@@ -90,15 +90,13 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver, 
         updateLocation(animated: false)
     }
 
-    private func setMainContentHidden(_ isHidden: Bool, animated: Bool) {
+    func setMainContentHidden(_ isHidden: Bool, animated: Bool) {
         let actions = {
             self.mainContentView.containerView.alpha = isHidden ? 0 : 1
         }
 
         if animated {
-            UIView.animate(withDuration: 0.25) {
-                actions()
-            }
+            UIView.animate(withDuration: 0.25, animations: actions)
         } else {
             actions()
         }
@@ -124,27 +122,6 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver, 
 
     func tunnelPublicKeyDidChange(publicKeyWithMetadata: PublicKeyWithMetadata?) {
         // no-op
-    }
-
-    // MARK: - AccountObserver
-
-    func account(_ account: Account, didLoginWithToken token: String, expiry: Date) {
-        guard case .pad = UIDevice.current.userInterfaceIdiom else { return }
-
-//        prepareSidebarControllerData {
-//            self.setSidebarControllerHidden(false, animated: true)
-//        }
-        self.setMainContentHidden(false, animated: true)
-    }
-
-    func account(_ account: Account, didUpdateExpiry expiry: Date) {
-        // no-op
-    }
-
-    func accountDidLogout(_ account: Account) {
-        guard case .pad = UIDevice.current.userInterfaceIdiom else { return }
-
-        self.setMainContentHidden(true, animated: true)
     }
 
     // MARK: - Private
