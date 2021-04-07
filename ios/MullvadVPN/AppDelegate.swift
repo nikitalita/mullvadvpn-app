@@ -37,6 +37,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
     private var relayConstraints: RelayConstraints?
 
+    // MARK: - Application lifecycle
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Setup logging
         initLoggingSystem(bundleIdentifier: Bundle.main.bundleIdentifier!)
@@ -127,6 +129,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func applicationDidBecomeActive(_ application: UIApplication) {
         TunnelManager.shared.refreshTunnelState(completionHandler: nil)
     }
+
+    // MARK: - Private
 
     private func setupPadUI() {
         let selectLocationController = makeSelectLocationController()
@@ -282,6 +286,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
 }
 
+// MARK: - RootContainerViewControllerDelegate
+
 extension AppDelegate: RootContainerViewControllerDelegate {
     func rootContainer(_ controller: RootContainerViewController, preferredWidthForDetailViewWithContainerSize containerSize: CGSize) -> CGFloat {
         return max(300, containerSize.width * 0.3)
@@ -304,6 +310,8 @@ extension AppDelegate: RootContainerViewControllerDelegate {
         }
     }
 }
+
+// MARK: - LoginViewControllerDelegate
 
 extension AppDelegate: LoginViewControllerDelegate {
 
@@ -380,6 +388,8 @@ extension AppDelegate: LoginViewControllerDelegate {
 
 }
 
+// MARK: - SettingsNavigationControllerDelegate
+
 extension AppDelegate: SettingsNavigationControllerDelegate {
 
     func settingsNavigationController(_ controller: SettingsNavigationController, didFinishWithReason reason: SettingsDismissReason) {
@@ -409,6 +419,7 @@ extension AppDelegate: SettingsNavigationControllerDelegate {
 
 }
 
+// MARK: - ConnectViewControllerDelegate
 
 extension AppDelegate: ConnectViewControllerDelegate {
 
@@ -469,6 +480,8 @@ extension AppDelegate: ConnectViewControllerDelegate {
     }
 }
 
+// MARK: - SelectLocationViewControllerDelegate
+
 extension AppDelegate: SelectLocationViewControllerDelegate {
     func selectLocationViewController(_ controller: SelectLocationViewController, didSelectRelayLocation relayLocation: RelayLocation) {
         switch UIDevice.current.userInterfaceIdiom  {
@@ -513,6 +526,8 @@ extension AppDelegate: SelectLocationViewControllerDelegate {
     }
 }
 
+// MARK: - RelayCacheObserver
+
 extension AppDelegate: RelayCacheObserver {
 
     func relayCache(_ relayCache: RelayCache, didUpdateCachedRelays cachedRelays: CachedRelays) {
@@ -522,6 +537,8 @@ extension AppDelegate: RelayCacheObserver {
     }
 
 }
+
+// MARK: - AppStorePaymentManagerDelegate
 
 extension AppDelegate: AppStorePaymentManagerDelegate {
 
