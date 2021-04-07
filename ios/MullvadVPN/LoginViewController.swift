@@ -23,6 +23,8 @@ enum LoginState {
 }
 
 protocol LoginViewControllerDelegate: class {
+    func loginViewController(_ controller: LoginViewController, loginWithAccountToken accountToken: String, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void)
+    func loginViewControllerLoginWithNewAccount(_ controller: LoginViewController, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void)
     func loginViewControllerDidLogin(_ controller: LoginViewController)
 }
 
@@ -146,18 +148,14 @@ class LoginViewController: UIViewController, RootContainment {
         let accountToken = contentView.accountTextField.parsedToken
 
         beginLogin(method: .existingAccount)
-
-        Account.shared.login(with: accountToken) { (result) in
+        self.delegate?.loginViewController(self, loginWithAccountToken: accountToken, completion: { [weak self] (result) in
             switch result {
             case .success:
-                self.endLogin(.success(.existingAccount))
-
+                self?.endLogin(.success(.existingAccount))
             case .failure(let error):
-                self.logger.error(chainedError: error, message: "Failed to log in with existing account")
-
-                self.endLogin(.failure(error))
+                self?.endLogin(.failure(error))
             }
-        }
+        })
     }
 
     @objc func createNewAccount() {
@@ -166,18 +164,15 @@ class LoginViewController: UIViewController, RootContainment {
         contentView.accountTextField.autoformattingText = ""
         updateKeyboardToolbar()
 
-        Account.shared.loginWithNewAccount { (result) in
+        self.delegate?.loginViewControllerLoginWithNewAccount(self, completion: { [weak self] (result) in
             switch result {
             case .success(let response):
-                self.contentView.accountTextField.autoformattingText = response.token
-
-                self.endLogin(.success(.newAccount))
+                self?.contentView.accountTextField.autoformattingText = response.token
+                self?.endLogin(.success(.newAccount))
             case .failure(let error):
-                self.logger.error(chainedError: error, message: "Failed to log in with new account")
-
-                self.endLogin(.failure(error))
+                self?.endLogin(.failure(error))
             }
-        }
+        })
     }
 
     // MARK: - Private
