@@ -132,11 +132,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let selectLocationController = makeSelectLocationController()
         let connectController = makeConnectViewController()
 
-        let splitViewController = UISplitViewController()
+        let splitViewController = CustomSplitViewController()
         splitViewController.minimumPrimaryColumnWidth = 300
         splitViewController.preferredPrimaryColumnWidthFraction = 0.3
         splitViewController.primaryEdge = .trailing
         splitViewController.preferredDisplayMode = .allVisible
+        splitViewController.dividerColor = .secondaryColor
         splitViewController.viewControllers = [selectLocationController, connectController]
 
         self.rootContainer?.setViewControllers([splitViewController], animated: false)
@@ -521,25 +522,6 @@ extension AppDelegate: AppStorePaymentManagerDelegate {
         // Since we do not persist the relation between the payment and account token between the
         // app launches, we assume that all successful purchases belong to the active account token.
         return Account.shared.token
-    }
-
-}
-
-
-extension UISplitViewController: RootContainment {
-
-    var preferredHeaderBarStyle: HeaderBarStyle {
-        for case let viewController as RootContainment in viewControllers {
-            return viewController.preferredHeaderBarStyle
-        }
-        return .default
-    }
-
-    var prefersHeaderBarHidden: Bool {
-        for case let viewController as RootContainment in viewControllers {
-            return viewController.prefersHeaderBarHidden
-        }
-        return false
     }
 
 }
