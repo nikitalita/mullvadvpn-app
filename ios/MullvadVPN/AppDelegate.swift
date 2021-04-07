@@ -36,6 +36,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
     }
     private var relayConstraints: RelayConstraints?
+    private let alertPresenter = AlertPresenter()
 
     // MARK: - Application lifecycle
 
@@ -434,47 +435,68 @@ extension AppDelegate: ConnectViewControllerDelegate {
         self.presentedSelectLocationViewController = contentController
     }
 
-    func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController, completion: @escaping (TunnelManager.Error?) -> Void) {
-        connectTunnel(completion: completion)
+    func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController) {
+        connectTunnel()
     }
 
-    func connectViewControllerShouldDisconnectTunnel(_ controller: ConnectViewController, completion: @escaping (TunnelManager.Error?) -> Void) {
-        disconnectTunnel(completion: completion)
+    func connectViewControllerShouldDisconnectTunnel(_ controller: ConnectViewController) {
+        disconnectTunnel()
     }
 
     func connectViewControllerShouldReconnectTunnel(_ controller: ConnectViewController) {
-        TunnelManager.shared.reconnectTunnel(completionHandler: nil)
+        TunnelManager.shared.reconnectTunnel {
+            self.logger?.debug("Re-connected VPN tunnel")
+        }
     }
 
     @objc private func handleDismissSelectLocationController(_ sender: Any) {
         self.presentedSelectLocationViewController?.dismiss(animated: true)
     }
 
-    private func connectTunnel(completion: @escaping (TunnelManager.Error?) -> Void) {
+    private func connectTunnel() {
         TunnelManager.shared.startTunnel { (result) in
             DispatchQueue.main.async {
                 switch result {
                 case .success:
-                    completion(nil)
+                    self.logger?.debug("Connected VPN tunnel")
 
                 case .failure(let error):
                     self.logger?.error(chainedError: error, message: "Failed to start the VPN tunnel")
-                    completion(error)
+
+                    let alertController = UIAlertController(
+                        title: NSLocalizedString("Failed to start the VPN tunnel", comment: ""),
+                        message: error.errorChainDescription,
+                        preferredStyle: .alert
+                    )
+                    alertController.addAction(
+                        UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel)
+                    )
+
+                    self.alertPresenter.enqueue(alertController, presentingController: self.rootContainer!)
                 }
             }
         }
     }
 
-    private func disconnectTunnel(completion: @escaping (TunnelManager.Error?) -> Void) {
+    private func disconnectTunnel() {
         TunnelManager.shared.stopTunnel { (result) in
             switch result {
             case .success:
-                completion(nil)
+                self.logger?.debug("Disconnected VPN tunnel")
 
             case .failure(let error):
                 self.logger?.error(chainedError: error, message: "Failed to stop the VPN tunnel")
 
-                completion(error)
+                let alertController = UIAlertController(
+                    title: NSLocalizedString("Failed to stop the VPN tunnel", comment: ""),
+                    message: error.errorChainDescription,
+                    preferredStyle: .alert
+                )
+                alertController.addAction(
+                    UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel)
+                )
+
+                self.alertPresenter.enqueue(alertController, presentingController: self.rootContainer!)
             }
         }
     }
@@ -514,9 +536,7 @@ extension AppDelegate: SelectLocationViewControllerDelegate {
                 switch result {
                 case .success:
                     self.logger?.debug("Updated relay constraints: \(relayConstraints)")
-                    self.connectTunnel { (error) in
-                        // TODO: show error?
-                    }
+                    self.connectTunnel()
 
                 case .failure(let error):
                     self.logger?.error(chainedError: error, message: "Failed to update relay constraints")

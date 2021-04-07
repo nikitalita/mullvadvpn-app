@@ -8,7 +8,6 @@
 
 import UIKit
 import MapKit
-import NetworkExtension
 import Logging
 
 class CustomOverlayRenderer: MKOverlayRenderer {
@@ -21,8 +20,8 @@ class CustomOverlayRenderer: MKOverlayRenderer {
 
 protocol ConnectViewControllerDelegate: class {
     func connectViewControllerShouldShowSelectLocationPicker(_ controller: ConnectViewController)
-    func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController, completion: @escaping (TunnelManager.Error?) -> Void)
-    func connectViewControllerShouldDisconnectTunnel(_ controller: ConnectViewController, completion: @escaping (TunnelManager.Error?) -> Void)
+    func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController)
+    func connectViewControllerShouldDisconnectTunnel(_ controller: ConnectViewController)
     func connectViewControllerShouldReconnectTunnel(_ controller: ConnectViewController)
 }
 
@@ -40,8 +39,6 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver, 
 
     private var lastLocation: CLLocationCoordinate2D?
     private let locationMarker = MKPointAnnotation()
-
-    private let alertPresenter = AlertPresenter()
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
         return .lightContent
@@ -267,37 +264,11 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver, 
     }
 
     @objc func handleConnect(_ sender: Any) {
-        self.delegate?.connectViewControllerShouldConnectTunnel(self, completion: { (error) in
-            guard let error = error else { return }
-
-            let alertController = UIAlertController(
-                title: NSLocalizedString("Failed to start the VPN tunnel", comment: ""),
-                message: error.errorChainDescription,
-                preferredStyle: .alert
-            )
-            alertController.addAction(
-                UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel)
-            )
-
-            self.alertPresenter.enqueue(alertController, presentingController: self)
-        })
+        self.delegate?.connectViewControllerShouldConnectTunnel(self)
     }
 
     @objc func handleDisconnect(_ sender: Any) {
-        self.delegate?.connectViewControllerShouldDisconnectTunnel(self, completion: { (error) in
-            guard let error = error else { return }
-
-            let alertController = UIAlertController(
-                title: NSLocalizedString("Failed to stop the VPN tunnel", comment: ""),
-                message: error.errorChainDescription,
-                preferredStyle: .alert
-            )
-            alertController.addAction(
-                UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel)
-            )
-
-            self.alertPresenter.enqueue(alertController, presentingController: self)
-        })
+        self.delegate?.connectViewControllerShouldDisconnectTunnel(self)
     }
 
     @objc func handleReconnect(_ sender: Any) {
