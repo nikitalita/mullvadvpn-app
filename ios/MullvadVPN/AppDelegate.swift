@@ -14,19 +14,19 @@ import Logging
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
-    var rootContainer: RootContainerViewController?
 
-    var logger: Logger?
+    private var logger: Logger?
 
     #if targetEnvironment(simulator)
-    let simulatorTunnelProvider = SimulatorTunnelProviderHost()
+    private let simulatorTunnelProvider = SimulatorTunnelProviderHost()
     #endif
 
     #if DEBUG
     private let packetTunnelLogForwarder = LogStreamer<UTF8>(fileURLs: [ApplicationConfiguration.packetTunnelLogFileURL!])
     #endif
 
-    private weak var presentedSelectLocationViewController: SelectLocationViewController?
+    private var rootContainer: RootContainerViewController?
+    private weak var selectLocationViewController: SelectLocationViewController?
 
     private var cachedRelays: CachedRelays? {
         didSet {
