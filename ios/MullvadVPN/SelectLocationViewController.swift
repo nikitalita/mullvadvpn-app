@@ -123,6 +123,16 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
         isViewAppeared = false
     }
 
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+
+        coordinator.animate { (context) in
+            if let indexPath = self.dataSource?.indexPathForSelectedRelay() {
+                self.tableView.scrollToRow(at: indexPath, at: .middle, animated: false)
+            }
+        }
+    }
+
     // MARK: - UITableViewDelegate
 
     func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
