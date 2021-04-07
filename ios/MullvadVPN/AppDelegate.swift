@@ -308,13 +308,17 @@ extension AppDelegate: RootContainerViewControllerDelegate {
 extension AppDelegate: LoginViewControllerDelegate {
 
     func loginViewController(_ controller: LoginViewController, loginWithAccountToken accountToken: String, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void) {
+        self.rootContainer?.setEnableSettingsButton(false)
+
         Account.shared.login(with: accountToken) { (result) in
             switch result {
             case .success:
                 self.logger?.debug("Logged in with existing token")
+                // RootContainer's settings button will be re-enabled in `loginViewControllerDidLogin`
 
             case .failure(let error):
                 self.logger?.error(chainedError: error, message: "Failed to log in with existing account")
+                self.rootContainer?.setEnableSettingsButton(true)
             }
 
             completion(result)
@@ -322,13 +326,17 @@ extension AppDelegate: LoginViewControllerDelegate {
     }
 
     func loginViewControllerLoginWithNewAccount(_ controller: LoginViewController, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void) {
+        self.rootContainer?.setEnableSettingsButton(false)
+
         Account.shared.loginWithNewAccount { (result) in
             switch result {
             case .success:
                 self.logger?.debug("Logged in with new account token")
+                // RootContainer's settings button will be re-enabled in `loginViewControllerDidLogin`
 
             case .failure(let error):
                 self.logger?.error(chainedError: error, message: "Failed to log in with new account")
+                self.rootContainer?.setEnableSettingsButton(true)
             }
 
             completion(result)
@@ -365,6 +373,7 @@ extension AppDelegate: LoginViewControllerDelegate {
                 }
 
                 self.window?.isUserInteractionEnabled = true
+                self.rootContainer?.setEnableSettingsButton(true)
             }
         }
     }

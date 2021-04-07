@@ -188,15 +188,10 @@ class LoginViewController: UIViewController, RootContainment {
             contentView.activityIndicator.startAnimating()
             contentView.createAccountButton.isEnabled = false
 
-            // Fallthrough to make sure that the settings button is disabled
-            // in .authenticating and .success cases.
-            fallthrough
-
         case .success:
-            rootContainerController?.setEnableSettingsButton(false)
+            break
 
         case .default, .failure:
-            rootContainerController?.setEnableSettingsButton(true)
             contentView.createAccountButton.isEnabled = true
             contentView.activityIndicator.stopAnimating()
         }
@@ -235,8 +230,6 @@ class LoginViewController: UIViewController, RootContainment {
         } else if case .success = loginState {
             // Navigate to the main view after 1s delay
             DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) {
-                self.rootContainerController?.setEnableSettingsButton(true)
-
                 self.delegate?.loginViewControllerDidLogin(self)
             }
         }
