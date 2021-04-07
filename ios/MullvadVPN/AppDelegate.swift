@@ -26,12 +26,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     #endif
 
     private var rootContainer: RootContainerViewController?
+    private weak var splitViewController: CustomSplitViewController?
     private weak var selectLocationViewController: SelectLocationViewController?
+    private weak var connectController: ConnectViewController?
 
     private var cachedRelays: CachedRelays? {
         didSet {
             if let cachedRelays = cachedRelays {
-                self.presentedSelectLocationViewController?.setCachedRelays(cachedRelays)
+                self.selectLocationViewController?.setCachedRelays(cachedRelays)
             }
         }
     }
@@ -141,12 +143,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         splitViewController.minimumPrimaryColumnWidth = 300
         splitViewController.preferredPrimaryColumnWidthFraction = 0.3
         splitViewController.primaryEdge = .trailing
-        splitViewController.preferredDisplayMode = .allVisible
         splitViewController.dividerColor = .secondaryColor
         splitViewController.viewControllers = [selectLocationController, connectController]
 
         self.rootContainer?.setViewControllers([splitViewController], animated: false)
-        self.presentedSelectLocationViewController = selectLocationController
+        self.selectLocationViewController = selectLocationController
+        self.splitViewController = splitViewController
+        self.connectController = connectController
+
+        showSplitViewMaster(Account.shared.isLoggedIn, animated: false)
 
         if !Account.shared.isAgreedToTermsOfService {
             let consentViewController = self.makeConsentController { [weak self] (viewController) in
@@ -178,7 +183,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             var viewControllers: [UIViewController] = [loginViewController]
 
             if Account.shared.isLoggedIn {
-                viewControllers.append(self.makeConnectViewController())
+                let connectController = self.makeConnectViewController()
+                viewControllers.append(connectController)
+                self.connectController = connectController
             }
 
             self.rootContainer?.setViewControllers(viewControllers, animated: animated) {
@@ -285,6 +292,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         Account.shared.startPaymentMonitoring(with: paymentManager)
     }
 
+    private func showSplitViewMaster(_ flag: Bool, animated: Bool) {
+        if flag {
+            splitViewController?.preferredDisplayMode = .allVisible
+            connectController?.setMainContentHidden(false, animated: animated)
+        } else {
+            splitViewController?.preferredDisplayMode = .primaryHidden
+            connectController?.setMainContentHidden(true, animated: animated)
+        }
+    }
+
 }
 
 // MARK: - RootContainerViewControllerDelegate
@@ -362,7 +379,7 @@ extension AppDelegate: LoginViewControllerDelegate {
                 switch result {
                 case .success(let relayConstraints):
                     self.relayConstraints = relayConstraints
-                    self.presentedSelectLocationViewController?.setSelectedRelayLocation(relayConstraints.location.value, animated: false, scrollPosition: .middle)
+                    self.selectLocationViewController?.setSelectedRelayLocation(relayConstraints.location.value, animated: false, scrollPosition: .middle)
 
                 case .failure(let error):
                     self.logger?.error(chainedError: error, message: "Failed to load relay constraints after log in")
@@ -370,10 +387,14 @@ extension AppDelegate: LoginViewControllerDelegate {
 
                 switch UIDevice.current.userInterfaceIdiom {
                 case .phone:
-                    self.rootContainer?.pushViewController(self.makeConnectViewController(), animated: true) {
+                    let connectController = self.makeConnectViewController()
+                    self.rootContainer?.pushViewController(connectController, animated: true) {
                         self.showAccountSettingsControllerIfAccountExpired()
                     }
+                    self.connectController = connectController
                 case .pad:
+                    self.showSplitViewMaster(true, animated: true)
+
                     controller.dismiss(animated: true) {
                         self.showAccountSettingsControllerIfAccountExpired()
                     }
@@ -406,6 +427,10 @@ extension AppDelegate: SettingsNavigationControllerDelegate {
             controller.dismiss(animated: true)
 
         case .pad:
+            if case .userLoggedOut = reason {
+                self.showSplitViewMaster(false, animated: true)
+            }
+
             controller.dismiss(animated: true) {
                 if case .userLoggedOut = reason {
                     self.rootContainer?.present(self.makeLoginController(), animated: true)
@@ -432,7 +457,7 @@ extension AppDelegate: ConnectViewControllerDelegate {
 
         let navController = SelectLocationNavigationController(contentController: contentController)
         self.rootContainer?.present(navController, animated: true)
-        self.presentedSelectLocationViewController = contentController
+        self.selectLocationViewController = contentController
     }
 
     func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController) {
@@ -450,7 +475,7 @@ extension AppDelegate: ConnectViewControllerDelegate {
     }
 
     @objc private func handleDismissSelectLocationController(_ sender: Any) {
-        self.presentedSelectLocationViewController?.dismiss(animated: true)
+        self.selectLocationViewController?.dismiss(animated: true)
     }
 
     private func connectTunnel() {
