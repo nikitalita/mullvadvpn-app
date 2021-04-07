@@ -29,8 +29,8 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver, 
 {
     weak var delegate: ConnectViewControllerDelegate?
 
-    private lazy var mainContentView: ConnectMainContentView = {
-        let view = ConnectMainContentView(frame: self.view.bounds)
+    private let mainContentView: ConnectMainContentView = {
+        let view = ConnectMainContentView(frame: UIScreen.main.bounds)
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
