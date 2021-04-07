@@ -37,6 +37,7 @@ class SelectLocationViewController: UIViewController, RelayCacheObserver, UITabl
     private var dataSource: LocationDataSource?
     private var setCachedRelaysOnViewDidLoad: CachedRelays?
     private var setRelayLocationOnViewDidLoad: RelayLocation?
+    private var setScrollPositionOnViewDidLoad: UITableView.ScrollPosition = .none
     private var isViewAppeared = false
 
     var didSelectRelayLocation: ((SelectLocationViewController, RelayLocation) -> Void)?
@@ -91,7 +92,7 @@ class SelectLocationViewController: UIViewController, RelayCacheObserver, UITabl
                 setRelayLocationOnViewDidLoad,
                 showHiddenParents: true,
                 animated: false,
-                scrollPosition: .none
+                scrollPosition: setScrollPositionOnViewDidLoad
             )
         }
 
@@ -190,6 +191,7 @@ class SelectLocationViewController: UIViewController, RelayCacheObserver, UITabl
     func setSelectedRelayLocation(_ relayLocation: RelayLocation?, animated: Bool, scrollPosition: UITableView.ScrollPosition) {
         guard isViewLoaded else {
             self.setRelayLocationOnViewDidLoad = relayLocation
+            self.setScrollPositionOnViewDidLoad = scrollPosition
             return
         }
 
