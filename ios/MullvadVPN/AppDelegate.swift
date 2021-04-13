@@ -147,11 +147,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         splitViewController.dividerColor = UIColor.MainSplitView.dividerColor
         splitViewController.viewControllers = [selectLocationController, connectController]
 
-        self.rootContainer?.setViewControllers([splitViewController], animated: false)
         self.selectLocationViewController = selectLocationController
         self.splitViewController = splitViewController
         self.connectController = connectController
 
+        self.rootContainer?.setViewControllers([splitViewController], animated: false)
         showSplitViewMaster(Account.shared.isLoggedIn, animated: false)
 
         if !Account.shared.isAgreedToTermsOfService {
