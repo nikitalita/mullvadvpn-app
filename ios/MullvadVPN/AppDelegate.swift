@@ -532,8 +532,8 @@ extension AppDelegate: ConnectViewControllerDelegate {
 
 extension AppDelegate: SelectLocationViewControllerDelegate {
     func selectLocationViewController(_ controller: SelectLocationViewController, didSelectRelayLocation relayLocation: RelayLocation) {
-        switch UIDevice.current.userInterfaceIdiom  {
-        case .phone:
+        // Dismiss view controller in modal presentation
+        if controller.presentingViewController != nil {
             self.window?.isUserInteractionEnabled = false
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) {
                 self.window?.isUserInteractionEnabled = true
@@ -541,12 +541,8 @@ extension AppDelegate: SelectLocationViewControllerDelegate {
                     self.selectLocationControllerDidSelectRelayLocation(relayLocation)
                 }
             }
-
-        case .pad:
+        } else {
             selectLocationControllerDidSelectRelayLocation(relayLocation)
-
-        default:
-            fatalError()
         }
     }
 
@@ -611,6 +607,14 @@ extension AppDelegate: UISplitViewControllerDelegate {
     func primaryViewController(forCollapsing splitViewController: UISplitViewController) -> UIViewController? {
         // Set the connect controller as primary when collapsing the split view
         return connectController
+    }
+
+    func splitViewController(_ splitViewController: UISplitViewController, separateSecondaryFrom primaryViewController: UIViewController) -> UIViewController? {
+        // Dismiss the select location controller when expanding the split view
+        if self.selectLocationViewController?.presentingViewController != nil {
+            self.selectLocationViewController?.dismiss(animated: false)
+        }
+        return nil
     }
 
 }
