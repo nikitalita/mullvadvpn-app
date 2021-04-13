@@ -26,9 +26,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     #endif
 
     private var rootContainer: RootContainerViewController?
-    private weak var splitViewController: CustomSplitViewController?
-    private weak var selectLocationViewController: SelectLocationViewController?
-    private weak var connectController: ConnectViewController?
+    private var splitViewController: CustomSplitViewController?
+    private var selectLocationViewController: SelectLocationViewController?
+    private var connectController: ConnectViewController?
 
     private var cachedRelays: CachedRelays? {
         didSet {
@@ -140,6 +140,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let connectController = makeConnectViewController()
 
         let splitViewController = CustomSplitViewController()
+        splitViewController.delegate = self
         splitViewController.minimumPrimaryColumnWidth = UIMetrics.minimumSplitViewSidebarWidth
         splitViewController.preferredPrimaryColumnWidthFraction = UIMetrics.maximumSplitViewSidebarWidthFraction
         splitViewController.primaryEdge = .trailing
@@ -593,6 +594,23 @@ extension AppDelegate: AppStorePaymentManagerDelegate {
         // Since we do not persist the relation between the payment and account token between the
         // app launches, we assume that all successful purchases belong to the active account token.
         return Account.shared.token
+    }
+
+}
+
+
+// MARK: - UISplitViewControllerDelegate
+
+extension AppDelegate: UISplitViewControllerDelegate {
+
+    func primaryViewController(forExpanding splitViewController: UISplitViewController) -> UIViewController? {
+        // Restore the select location controller as primary when expanding the split view
+        return selectLocationViewController
+    }
+
+    func primaryViewController(forCollapsing splitViewController: UISplitViewController) -> UIViewController? {
+        // Set the connect controller as primary when collapsing the split view
+        return connectController
     }
 
 }
