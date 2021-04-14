@@ -96,6 +96,7 @@ class AutomaticKeyboardResponder {
         return iterator.first { $0 is UIViewController } as? UIViewController
     }
 
+    /// Returns the presentation container view that's moved along with the keyboard on iPad
     private var presentationContainerView: UIView? {
         var currentView = parentViewController?.view
         let iterator = AnyIterator { () -> UIView? in
