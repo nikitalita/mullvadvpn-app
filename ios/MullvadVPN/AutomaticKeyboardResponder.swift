@@ -99,9 +99,8 @@ class AutomaticKeyboardResponder {
     private var presentationContainerView: UIView? {
         var currentView = parentViewController?.view
         let iterator = AnyIterator { () -> UIView? in
-            let next = currentView?.superview
-            currentView = next
-            return next
+            currentView = currentView?.superview
+            return currentView
         }
 
         // Find the container view that private `_UIFormSheetPresentationController` moves
