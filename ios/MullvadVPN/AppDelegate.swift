@@ -154,23 +154,25 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         self.rootContainer?.setViewControllers([splitViewController], animated: false)
         showSplitViewMaster(Account.shared.isLoggedIn, animated: false)
 
+        let rootContainerWrapper = makeLoginContainerController()
+
         if !Account.shared.isAgreedToTermsOfService {
             let consentViewController = self.makeConsentController { [weak self] (viewController) in
                 guard let self = self else { return }
 
                 if Account.shared.isLoggedIn {
-                    viewController.dismiss(animated: true) {
+                    rootContainerWrapper.dismiss(animated: true) {
                         self.showAccountSettingsControllerIfAccountExpired()
                     }
                 } else {
-                    viewController.dismiss(animated: true) {
-                        self.rootContainer?.present(self.makeLoginController(), animated: true)
-                    }
+                    rootContainerWrapper.pushViewController(self.makeLoginController(), animated: true)
                 }
             }
-            self.rootContainer?.present(consentViewController, animated: true)
+            rootContainerWrapper.setViewControllers([consentViewController], animated: false)
+            self.rootContainer?.present(rootContainerWrapper, animated: true)
         } else if !Account.shared.isLoggedIn {
-            self.rootContainer?.present(makeLoginController(), animated: true)
+            rootContainerWrapper.setViewControllers([makeLoginController()], animated: false)
+            self.rootContainer?.present(rootContainerWrapper, animated: true)
         } else {
             self.showAccountSettingsControllerIfAccountExpired()
         }
@@ -231,7 +233,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let consentViewController = ConsentViewController()
 
         if UIDevice.current.userInterfaceIdiom == .pad {
-            consentViewController.preferredContentSize = CGSize(width: 480, height: 600)
             consentViewController.modalPresentationStyle = .formSheet
             if #available(iOS 13.0, *) {
                 consentViewController.isModalInPresentation = true
@@ -239,11 +240,25 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
 
         consentViewController.completionHandler = { (consentViewController) in
-            Account.shared.agreeToTermsOfService()
+//            Account.shared.agreeToTermsOfService()
             completion(consentViewController)
         }
 
         return consentViewController
+    }
+
+    private func makeLoginContainerController() -> RootContainerViewController {
+        let rootContainerWrapper = RootContainerViewController()
+        rootContainerWrapper.delegate = self
+        rootContainerWrapper.presentationController?.delegate = self
+        rootContainerWrapper.preferredContentSize = CGSize(width: 480, height: 600)
+
+        if #available(iOS 13.0, *) {
+            // Prevent swiping off the login or consent controllers
+            rootContainerWrapper.isModalInPresentation = true
+        }
+
+        return rootContainerWrapper
     }
 
     private func makeLoginController() -> LoginViewController {
@@ -251,7 +266,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         controller.delegate = self
 
         if UIDevice.current.userInterfaceIdiom == .pad {
-            controller.preferredContentSize = CGSize(width: 320, height: 400)
             controller.modalPresentationStyle = .formSheet
             if #available(iOS 13.0, *) {
                 controller.isModalInPresentation = true
@@ -315,7 +329,13 @@ extension AppDelegate: RootContainerViewControllerDelegate {
     func rootContainerViewControllerShouldShowSettings(_ controller: RootContainerViewController, navigateTo route: SettingsNavigationRoute?, animated: Bool) {
         let navController = makeSettingsNavigationController(route: route)
 
-        controller.present(navController, animated: animated)
+        // On iPad the login controller can be presented modally above the root container.
+        // in that case we have to use the presented controller to present the next modal.
+        if let presentedController = controller.presentedViewController {
+            presentedController.present(navController, animated: true)
+        } else {
+            controller.present(navController, animated: true)
+        }
     }
 
     func rootContainerViewSupportedInterfaceOrientations(_ controller: RootContainerViewController) -> UIInterfaceOrientationMask {
@@ -372,6 +392,9 @@ extension AppDelegate: LoginViewControllerDelegate {
 
     func loginViewControllerDidLogin(_ controller: LoginViewController) {
         self.window?.isUserInteractionEnabled = false
+
+        // Move the settings button back into header bar
+        self.rootContainer?.removeSettingsButtonFromPresentationContainer()
 
         TunnelManager.shared.getRelayConstraints { [weak self] (result) in
             guard let self = self else { return }
@@ -434,7 +457,9 @@ extension AppDelegate: SettingsNavigationControllerDelegate {
 
             controller.dismiss(animated: true) {
                 if case .userLoggedOut = reason {
-                    self.rootContainer?.present(self.makeLoginController(), animated: true)
+                    let rootContainerWrapper = self.makeLoginContainerController()
+                    rootContainerWrapper.setViewControllers([self.makeLoginController()], animated: false)
+                    self.rootContainer?.present(rootContainerWrapper, animated: true)
                 }
             }
 
@@ -563,6 +588,58 @@ extension AppDelegate: SelectLocationViewControllerDelegate {
                 case .failure(let error):
                     self.logger?.error(chainedError: error, message: "Failed to update relay constraints")
                 }
+            }
+        }
+    }
+}
+
+// MARK: - UIAdaptivePresentationControllerDelegate
+
+extension AppDelegate: UIAdaptivePresentationControllerDelegate {
+
+    func adaptivePresentationStyle(for controller: UIPresentationController, traitCollection: UITraitCollection) -> UIModalPresentationStyle {
+        if controller.presentedViewController is RootContainerViewController {
+            // Use .formSheet presentation in regular horizontal environment and .fullScreen
+            // in compact environment.
+            if traitCollection.horizontalSizeClass == .regular {
+                return .formSheet
+            } else {
+                return .fullScreen
+            }
+        } else {
+            return .none
+        }
+    }
+
+    func presentationController(_ controller: UIPresentationController, viewControllerForAdaptivePresentationStyle style: UIModalPresentationStyle) -> UIViewController? {
+        return nil
+    }
+
+    func presentationController(_ presentationController: UIPresentationController, willPresentWithAdaptiveStyle style: UIModalPresentationStyle, transitionCoordinator: UIViewControllerTransitionCoordinator?) {
+        // Force hide header bar in .formSheet presentation and show it in .fullScreen presentation
+        if let wrapper = presentationController.presentedViewController as? RootContainerViewController {
+            wrapper.setOverrideHeaderBarHidden(style == .formSheet, animated: false)
+        }
+        
+        guard style == .formSheet else {
+            // Move the settings button back into header bar
+            self.rootContainer?.removeSettingsButtonFromPresentationContainer()
+
+            return
+        }
+
+        // Add settings button into the modal container to make it accessible by user
+        if let transitionCoordinator = transitionCoordinator {
+            transitionCoordinator.animate(alongsideTransition: { (context) in
+                self.rootContainer?.addSettingsButtonToPresentationContainer(context.containerView)
+            }, completion: { (context) in
+                // no-op
+            })
+        } else {
+            if let containerView = presentationController.containerView {
+                self.rootContainer?.addSettingsButtonToPresentationContainer(containerView)
+            } else {
+                logger?.warning("Cannot obtain the containerView for presentation controller when presenting with adaptive style \(style.rawValue) and missing transition coordinator.")
             }
         }
     }
