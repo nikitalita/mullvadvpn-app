@@ -121,6 +121,11 @@ class LoginViewController: UIViewController, RootContainment {
                                        object: contentView.accountTextField)
     }
 
+    override var disablesAutomaticKeyboardDismissal: Bool {
+        // Allow dismissing the keyboard in .formSheet presentation style
+        return false
+    }
+
     // MARK: - Public
 
     func reset() {
