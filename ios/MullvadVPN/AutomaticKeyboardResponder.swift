@@ -88,9 +88,8 @@ class AutomaticKeyboardResponder {
     private var parentViewController: UIViewController? {
         var responder: UIResponder? = targetView
         let iterator = AnyIterator { () -> UIResponder? in
-            let next = responder?.next
-            responder = next
-            return next
+            responder = responder?.next
+            return responder
         }
 
         return iterator.first { $0 is UIViewController } as? UIViewController
