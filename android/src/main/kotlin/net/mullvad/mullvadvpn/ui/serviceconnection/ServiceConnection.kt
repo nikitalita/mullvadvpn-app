@@ -17,7 +17,7 @@ import org.koin.core.parameter.parametersOf
 import org.koin.core.qualifier.named
 import org.koin.core.scope.KoinScopeComponent
 import org.koin.core.scope.Scope
-import org.koin.core.scope.inject
+import org.koin.core.scope.get
 
 // Container of classes that communicate with the service through an active connection
 //
@@ -26,12 +26,11 @@ import org.koin.core.scope.inject
 @OptIn(KoinApiExtension::class)
 class ServiceConnection(private val service: ServiceInstance, mainActivity: MainActivity) :
     KoinScopeComponent {
-    override val scope: Scope by lazy {
-        getKoin().createScope(
-            SERVICE_CONNECTION_SCOPE,
-            named(SERVICE_CONNECTION_SCOPE), this
-        )
-    }
+    override val scope: Scope = getKoin().createScope(
+        SERVICE_CONNECTION_SCOPE,
+        named(SERVICE_CONNECTION_SCOPE), this
+    )
+
     val dispatcher = DispatchingHandler(Looper.getMainLooper()) { message ->
         Event.fromMessage(message)
     }
@@ -42,7 +41,7 @@ class ServiceConnection(private val service: ServiceInstance, mainActivity: Main
     val keyStatusListener = KeyStatusListener(service.messenger, dispatcher)
     val locationInfoCache = LocationInfoCache(dispatcher)
     val settingsListener = SettingsListener(dispatcher)
-    val splitTunneling by inject<SplitTunneling>(
+    val splitTunneling = get<SplitTunneling>(
         parameters = { parametersOf(service.messenger, dispatcher) }
     )
     val vpnPermission = VpnPermission(service.messenger)
