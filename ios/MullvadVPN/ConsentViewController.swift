@@ -19,8 +19,8 @@ class ConsentViewController: UIViewController, RootContainment, SFSafariViewCont
         return .lightContent
     }
 
-    var preferredHeaderBarStyle: HeaderBarStyle {
-        return .transparent
+    var preferredHeaderBarPresentation: HeaderBarPresentation {
+        return HeaderBarPresentation(style: .transparent, showsDivider: false)
     }
 
     var prefersHeaderBarHidden: Bool {
