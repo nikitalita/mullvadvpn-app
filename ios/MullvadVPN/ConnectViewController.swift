@@ -436,7 +436,7 @@ private extension TunnelState {
             }
 
         default:
-            fatalError("Not supported")
+            return []
         }
     }
 
