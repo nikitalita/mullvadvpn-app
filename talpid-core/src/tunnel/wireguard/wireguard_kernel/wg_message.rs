@@ -348,16 +348,11 @@ pub struct I64TimeSpec {
     pub tv_nsec: i64,
 }
 
+#[cfg(target_pointer_width = "32")]
 fn get_i64timespec(ts :&libc::timespec) -> I64TimeSpec {
-    #[cfg(target_pointer_width = "64")]
     return I64TimeSpec {
-        tv_sec: ts.tv_sec,
-        tv_nsec: ts.tv_nsec,
-    };
-    #[cfg(target_pointer_width = "32")]
-    return &I64TimeSpec {
-        tv_sec: ts.tv_sec.to_i64(),
-        tv_nsec: ts.tv_nsec.to_i64(),
+        tv_sec: ts.tv_sec as i64,
+        tv_nsec: ts.tv_nsec as i64,
     }
 }
 
@@ -423,7 +418,7 @@ impl Nla for PeerNla {
                 #[cfg(target_pointer_width = "64")]
                 let timespec: &libc::timespec = last_handshake.as_ref();
                 #[cfg(target_pointer_width = "32")]
-                let timespec = get_i64timespec(timespec);
+                let timespec = get_i64timespec(last_handshake.as_ref());
                 buffer
                     .write(unsafe { struct_as_slice(&timespec) })
                     .expect("Buffer too small for timespec");

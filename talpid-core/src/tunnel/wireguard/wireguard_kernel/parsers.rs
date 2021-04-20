@@ -8,6 +8,8 @@ use std::{
 
 pub use netlink_packet_utils::parsers::*;
 use netlink_packet_utils::DecodeError;
+#[cfg(target_pointer_width = "32")]
+use std::convert::TryFrom;
 
 pub fn parse_ip_addr(bytes: &[u8]) -> Result<IpAddr, DecodeError> {
     if bytes.len() == 4 {
@@ -83,9 +85,14 @@ pub fn parse_timespec(buffer: &[u8]) -> Result<TimeSpec, DecodeError> {
     //if buffer.len() != mem::size_of::<libc::timespec>() {
     //    return Err(format!("Unexpected size for timespec: {}", buffer.len()).into());
     //}
+    // TODO: Remove this before the year 2038
+    let try_sec = i32::try_from(NativeEndian::read_i64(buffer));
+    assert!(try_sec.is_ok());
+    let try_nsec = i32::try_from(NativeEndian::read_i64(buffer));
+    assert!(try_nsec.is_ok());
     Ok(TimeSpec::from(libc::timespec {
-        tv_sec: Ok(NativeEndian::read_i64(buffer).to_i32()),
-        tv_nsec: Ok(NativeEndian::read_i64(buffer).to_i32()),
+        tv_sec: try_sec.unwrap(),
+        tv_nsec: try_nsec.unwrap(),
     }))
 }
 
