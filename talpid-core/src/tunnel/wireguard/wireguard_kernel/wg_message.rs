@@ -342,6 +342,25 @@ pub enum PeerNla {
     ProtocolVersion(u32),
 }
 
+#[derive(Copy, Clone)]
+pub struct I64TimeSpec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+fn get_i64timespec(ts :&libc::timespec) -> I64TimeSpec {
+    #[cfg(target_pointer_width = "64")]
+    return I64TimeSpec {
+        tv_sec: ts.tv_sec,
+        tv_nsec: ts.tv_nsec,
+    };
+    #[cfg(target_pointer_width = "32")]
+    return &I64TimeSpec {
+        tv_sec: ts.tv_sec.to_i64(),
+        tv_nsec: ts.tv_nsec.to_i64(),
+    }
+}
+
 impl Nla for PeerNla {
     fn value_len(&self) -> usize {
         use PeerNla::*;
@@ -401,9 +420,12 @@ impl Nla for PeerNla {
                 NativeEndian::write_u16(buffer, *interval);
             }
             LastHandshakeTime(last_handshake) => {
+                #[cfg(target_pointer_width = "64")]
                 let timespec: &libc::timespec = last_handshake.as_ref();
+                #[cfg(target_pointer_width = "32")]
+                let timespec = get_i64timespec(timespec);
                 buffer
-                    .write(unsafe { struct_as_slice(timespec) })
+                    .write(unsafe { struct_as_slice(&timespec) })
                     .expect("Buffer too small for timespec");
             }
             RxBytes(num_bytes) | TxBytes(num_bytes) => NativeEndian::write_u64(buffer, *num_bytes),

@@ -66,17 +66,29 @@ pub fn parse_inet_sockaddr(buffer: &[u8]) -> Result<InetAddr, DecodeError> {
     }
 }
 
+#[cfg(target_pointer_width = "64")]
 pub fn parse_timespec(buffer: &[u8]) -> Result<TimeSpec, DecodeError> {
     if buffer.len() != mem::size_of::<libc::timespec>() {
         return Err(format!("Unexpected size for timespec: {}", buffer.len()).into());
     }
-
     Ok(TimeSpec::from(libc::timespec {
         tv_sec: NativeEndian::read_i64(buffer),
         // TODO: become compatible with 32-bit systems maybe?
         tv_nsec: NativeEndian::read_i64(buffer),
     }))
 }
+
+#[cfg(target_pointer_width = "32")]
+pub fn parse_timespec(buffer: &[u8]) -> Result<TimeSpec, DecodeError> {
+    //if buffer.len() != mem::size_of::<libc::timespec>() {
+    //    return Err(format!("Unexpected size for timespec: {}", buffer.len()).into());
+    //}
+    Ok(TimeSpec::from(libc::timespec {
+        tv_sec: Ok(NativeEndian::read_i64(buffer).to_i32()),
+        tv_nsec: Ok(NativeEndian::read_i64(buffer).to_i32()),
+    }))
+}
+
 
 pub fn parse_cstring(buffer: &[u8]) -> Result<CString, DecodeError> {
     Ok(CStr::from_bytes_with_nul(buffer)
