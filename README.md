@@ -312,16 +312,14 @@ will fail. To work around this, install fpm system-wide:
 Debian:
 ```bash
 sudo apt-get install ruby ruby-dev rubygems build-essential rpm
-gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
+sudo gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
 ```
 
 Fedora/RHEL:
 ```bash
 sudo dnf install ruby-devel gcc make rpm-build libffi-devel
-gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
+sudo gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
 ```
-
-Use `sudo` if the gem install throws errors.
 
 Then, set the following environment variables so that electron-builder does not use the distributed fpm binary:
 ```
@@ -346,7 +344,7 @@ npm ci
 ```
 
 After that copy the files from `gui/src/main/management_interface/` and `gui/build/src/main/management_interface/`
-directories into a single directory on your Apple Silicon Mac, and set the value of
+directories into a single directory on your arm64 machine, and set the value of
 `MANAGEMENT_INTERFACE_PROTO_BUILD_DIR` to that directory while running the main build.
 
 Make sure that the version of Go on your Mac or Linux machine is 1.16 (the first version to add
