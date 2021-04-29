@@ -304,10 +304,17 @@ Building this requires at least 1GB of memory.
 By default a universal app is built on macOS. To build specifically for x86_64 or ARM64 add
 `--target x86_64-apple-darwin` or `--target aarch64-apple-darwin`.
 
-##### Apple ARM64 (aka Apple Silicon)
+#### Linux ARM64
+
+`electron-builder` does not provide binaries for `fpm` on Linux for arm64 machines, so the packaging step
+will fail. 
+Install fpm system-wide by running `gem install --user-install fpm -v 1.9.3`, then set the following environment
+variable so that electron-builder does not use the distributed fpm binary:
+`export USE_SYSTEM_FPM="true"`
+#### Linux ARM64 and Apple ARM64 (aka Apple Silicon)
 
 Due to inability to build the management interface proto files on ARM64 (see
-[this](https://github.com/grpc/grpc-node/issues/1497) issue) the Apple ARM64 build must be done in 2 stages:
+[this](https://github.com/grpc/grpc-node/issues/1497) issue) the Apple and Linux ARM64 builds must be done in 2 stages:
 
 1. Build management interface proto files on a non-ARM64 platform
 2. Use the built proto files during the main build by setting the `MANAGEMENT_INTERFACE_PROTO_BUILD_DIR`
@@ -325,14 +332,23 @@ After that copy the files from `gui/src/main/management_interface/` and `gui/bui
 directories into a single directory on your Apple Silicon Mac, and set the value of
 `MANAGEMENT_INTERFACE_PROTO_BUILD_DIR` to that directory while running the main build.
 
-Make sure that the version of Go on your Mac is 1.16 (the first version to add
+Make sure that the version of Go on your Mac or Linux machine is 1.16 (the first version to add
 [support](https://tip.golang.org/doc/go1.16#darwin) for Apple Silicon) or newer.
 
 Install `protobuf` by running:
 
+Mac:
 ```bash
 brew install protobuf
 ```
+
+Debian:
+```bash
+sudo apt install protobuf-compiler
+```
+
+RPM:
+** TODO: Figure out what Redhat uses
 
 When all is done run the main build. Assuming that you copied the proto files into `/tmp/management_interface_proto`
 directory, the build command will look as follows:

@@ -69,10 +69,10 @@ function build_windows {
 
 function unix_target_triple {
     local platform="$(uname -s)"
+    local arch="$(uname -m)"
     if [[ ("${platform}" == "Linux") ]]; then
-        echo "x86_64-unknown-linux-gnu"
+        echo "${arch}-unknown-linux-gnu"
     elif [[ ("${platform}" == "Darwin") ]]; then
-        local arch="$(uname -m)"
         if [[ ("${arch}" == "arm64") ]]; then
             arch="aarch64"
         fi
