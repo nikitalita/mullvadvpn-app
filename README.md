@@ -306,11 +306,28 @@ By default a universal app is built on macOS. To build specifically for x86_64 o
 
 #### Linux ARM64
 
-`electron-builder` does not provide binaries for `fpm` on Linux for arm64 machines, so the packaging step
-will fail. 
-Install fpm system-wide by running `gem install --user-install fpm -v 1.9.3`, then set the following environment
-variable so that electron-builder does not use the distributed fpm binary:
-`export USE_SYSTEM_FPM="true"`
+`electron-builder` does not provide binaries for `fpm` on Linux for arm64 machines, and the packaging step
+will fail. To work around this, install fpm system-wide:
+
+Debian:
+```bash
+sudo apt-get install ruby ruby-dev rubygems build-essential rpm
+gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
+```
+
+Fedora/RHEL:
+```bash
+sudo dnf install ruby-devel gcc make rpm-build libffi-devel
+gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
+```
+
+Use `sudo` if the gem install throws errors.
+
+Then, set the following environment variables so that electron-builder does not use the distributed fpm binary:
+```
+export USE_SYSTEM_FPM="true"
+```
+
 #### Linux ARM64 and Apple ARM64 (aka Apple Silicon)
 
 Due to inability to build the management interface proto files on ARM64 (see

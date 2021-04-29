@@ -10,6 +10,8 @@ const noAppleNotarization = process.argv.includes('--no-apple-notarization');
 
 const arm64 = process.argv.includes('--arm64');
 const universal = process.argv.includes('--universal');
+// the native fpm does not support xzmt
+const rpmCompression = process.arch == "arm64" ?  "bzip2" : "xz";
 
 const config = {
   appId: 'net.mullvad.vpn',
@@ -161,6 +163,7 @@ const config = {
   },
 
   rpm: {
+    compression: rpmCompression,
     fpm: [
       '--before-install',
       distAssets('linux/before-install.sh'),
