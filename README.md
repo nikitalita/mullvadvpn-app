@@ -311,7 +311,7 @@ will fail. To work around this, install fpm system-wide:
 
 Debian:
 ```bash
-sudo apt-get install ruby ruby-dev rubygems build-essential rpm zlib1g zlib1g-dev
+sudo apt-get install ruby ruby-dev rubygems build-essential rpm zlib1g zlib1g-dev ruby-ffi ruby-ffi-libarchive
 sudo gem install --no-document fpm:1.12.0
 ```
 
