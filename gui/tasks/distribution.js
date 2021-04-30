@@ -10,8 +10,6 @@ const noAppleNotarization = process.argv.includes('--no-apple-notarization');
 
 const arm64 = process.argv.includes('--arm64');
 const universal = process.argv.includes('--universal');
-// the native fpm does not support xzmt
-const rpmCompression = arm64 ? "bzip2" : "xz";
 
 const config = {
   appId: 'net.mullvad.vpn',
@@ -137,6 +135,8 @@ const config = {
   },
 
   deb: {
+    // FPM 1.12.0 (i.e. system installed) will fail with xz compression set (the default)
+    compression: arm64 ? "gz" : "xz",
     fpm: [
       '--version',
       getDebVersion(),
@@ -163,8 +163,11 @@ const config = {
   },
 
   rpm: {
-    compression: rpmCompression,
     fpm: [
+      '--architecture',
+      // Without this, fpm will define the arch in the metadata as 'arm64', which is incorrect
+      // and the rpm cannot be installed on aarch64 distros.
+      arm64 ? 'aarch64' : 'x86_64',
       '--before-install',
       distAssets('linux/before-install.sh'),
       '--before-remove',

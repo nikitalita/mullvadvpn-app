@@ -96,7 +96,7 @@ else
     CARGO_ARGS+=(--locked)
 fi
 
-if [[ "${TARGET:-""}" == "aarch64-apple-darwin" ]] || [[ "${TARGET:-""}" == "aarch64-unknown-linux-gnu" ]]; then
+if [[ "${TARGET:-""}" == "aarch64-apple-darwin" ]] || [[ "$(uname -m)" == "aarch64" ]]; then
     NPM_PACK_ARGS+=(--arm64)
 fi
 

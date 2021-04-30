@@ -6,7 +6,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 case "$(uname -s)" in
   Linux*)
-    TARGET="$(uname -m)-unknown-linux-gnu"
+    HOST="$(uname -m)-unknown-linux-gnu"
     ;;
   Darwin*)
     arch="$(uname -m)"
