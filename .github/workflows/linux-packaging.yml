@@ -80,6 +80,7 @@ jobs:
 
     build-linux-packages-arm64:
       needs: build-linux-packages-x86_64
+      if: ${{ github.event_name == 'push' }}
       strategy:
           matrix:
               rust: [stable]
