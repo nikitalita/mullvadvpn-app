@@ -311,14 +311,14 @@ will fail. To work around this, install fpm system-wide:
 
 Debian:
 ```bash
-sudo apt-get install ruby ruby-dev rubygems build-essential rpm
-sudo gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
+sudo apt-get install ruby ruby-dev rubygems build-essential rpm zlib1g zlib1g-dev
+sudo gem install --no-document fpm:1.12.0
 ```
 
 Fedora/RHEL:
 ```bash
-sudo dnf install ruby-devel gcc make rpm-build libffi-devel
-sudo gem install --no-document ruby-xz:0.2.3 fpm:1.9.3
+sudo dnf install ruby-devel gcc make rpm-build libffi-devel zlib zlib-devel
+sudo gem install --no-document fpm:1.12.0
 ```
 
 Then, set the following environment variables so that electron-builder does not use the distributed fpm binary:
