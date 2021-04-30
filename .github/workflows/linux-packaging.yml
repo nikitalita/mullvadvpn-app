@@ -12,10 +12,11 @@ on:
     # Build if requested manually from the Actions tab
     workflow_dispatch:
 jobs:
-    check-frontend:
+    build-linux-packages-x86_64:
         strategy:
             matrix:
                 os: [ubuntu-latest]
+                rust: [stable]
 
         runs-on: ${{ matrix.os }}
         steps:
