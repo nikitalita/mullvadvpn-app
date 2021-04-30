@@ -85,7 +85,7 @@ jobs:
           matrix:
               rust: [stable]
 
-      runs-on: [self-hosted, linux, ubuntu-latest, ARM64]
+      runs-on: [self-hosted, linux, ARM64]
       steps:
 
           - name: Checkout repository
@@ -95,7 +95,7 @@ jobs:
             run: git submodule update --init --depth=1
 
           - name: Install Rust
-            uses: ATiltedTree/setup-rust@v1.0.4
+            uses: nikitalita/setup-rust@v1.0.5
             with:
                 rust-version: ${{ matrix.rust }}
 
