@@ -1,0 +1,77 @@
+name: Linux Packaging CI
+on:
+    # Build whenever a file that affects the packaging build is changed by a push
+    push:
+        paths:
+            - .github/workflows/linux-packaging.yml
+            - build.sh
+            - gui/tasks/**
+            - gui/package.json
+            - gui/gulpfile.js
+            - mullvad-management-interface/proto/**
+    # Build if requested manually from the Actions tab
+    workflow_dispatch:
+jobs:
+    check-frontend:
+        strategy:
+            matrix:
+                os: [ubuntu-latest]
+
+        runs-on: ${{ matrix.os }}
+        steps:
+
+            - name: Checkout repository
+              uses: actions/checkout@v2
+
+            - name: Checkout submodules
+              run: git submodule update --init --depth=1
+
+            - name: Install Rust
+              uses: ATiltedTree/setup-rust@v1.0.4
+              with:
+                  rust-version: ${{ matrix.rust }}
+
+            - name: Install Go
+              uses: actions/setup-go@v2.1.3
+              with:
+                  go-version: 1.16
+
+            - name: Setup Node.js environment
+              uses: actions/setup-node@v2.1.5
+              with:
+                  node-version: '12'
+
+            - name: Update NPM
+              run: npm i -g npm
+
+            - name: Install build dependencies
+              run: sudo apt-get install libdbus-1-dev rpm dpkg-dev
+
+            - name: Install and cache dependencies
+              uses: bahmutov/npm-install@v1
+              with:
+                  working-directory: gui
+                  install-command: npm ci
+
+            - name: Build
+              run: ./build.sh --dev-build
+
+            - name: 'Upload deb package'
+              uses: actions/upload-artifact@v2
+              with:
+                name: linux-deb
+                path: dist/Mullvad*.deb
+
+            - name: 'Upload rpm package'
+              uses: actions/upload-artifact@v2
+              with:
+                name: linux-deb
+                path: dist/Mullvad*.deb
+            
+            - name: 'Upload proto files'
+              uses: actions/upload-artifact@v2
+              with:
+                name: linux-mi-proto-build
+                path: |
+                  gui/src/main/management_interface/*.ts
+                  gui/build/src/main/management_interface/*.js
