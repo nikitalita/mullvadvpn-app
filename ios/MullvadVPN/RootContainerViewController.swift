@@ -25,21 +25,32 @@ enum HeaderBarStyle {
     }
 }
 
+struct HeaderBarPresentation {
+    let style: HeaderBarStyle
+    let showsDivider: Bool
+
+    static var `default`: HeaderBarPresentation {
+        return HeaderBarPresentation(style: .default, showsDivider: false)
+    }
+}
+
 /// A protocol that defines the relationship between the root container and its child controllers
 protocol RootContainment {
 
     /// Return the preferred header bar style
-    var preferredHeaderBarStyle: HeaderBarStyle { get }
+    var preferredHeaderBarPresentation: HeaderBarPresentation { get }
 
     /// Return true if the view controller prefers header bar hidden
     var prefersHeaderBarHidden: Bool { get }
 
 }
 
-protocol RootContainerViewControllerDelegate: class {
+protocol RootContainerViewControllerDelegate: AnyObject {
     func rootContainerViewControllerShouldShowSettings(_ controller: RootContainerViewController, navigateTo route: SettingsNavigationRoute?, animated: Bool)
 
     func rootContainerViewSupportedInterfaceOrientations(_ controller: RootContainerViewController) -> UIInterfaceOrientationMask
+
+    func rootContainerViewAccessibilityPerformMagicTap(_ controller: RootContainerViewController) -> Bool
 }
 
 /// A root container view controller
@@ -49,12 +60,16 @@ class RootContainerViewController: UIViewController {
 
     private let headerBarView = HeaderBarView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
     private let transitionContainer = UIView(frame: UIScreen.main.bounds)
+    private var presentationContainerSettingsButton: UIButton?
 
-    private(set) var headerBarStyle = HeaderBarStyle.default
+    private(set) var headerBarPresentation = HeaderBarPresentation.default
     private(set) var headerBarHidden = false
+    private(set) var overrideHeaderBarHidden: Bool?
 
     private(set) var viewControllers = [UIViewController]()
 
+    private var appearingController: UIViewController?
+    private var disappearingController: UIViewController?
     private var interfaceOrientationMask: UIInterfaceOrientationMask?
 
     var topViewController: UIViewController? {
@@ -73,6 +88,10 @@ class RootContainerViewController: UIViewController {
 
     override var shouldAutomaticallyForwardAppearanceMethods: Bool {
         return false
+    }
+
+    override var disablesAutomaticKeyboardDismissal: Bool {
+        return topViewController?.disablesAutomaticKeyboardDismissal ?? super.disablesAutomaticKeyboardDismissal
     }
 
     // MARK: - View lifecycle
@@ -105,25 +124,33 @@ class RootContainerViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        topViewController?.beginAppearanceTransition(true, animated: animated)
+        if let childController = topViewController {
+            beginChildControllerTransition(childController, isAppearing: true, animated: animated)
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
 
-        topViewController?.endAppearanceTransition()
+        if let childController = topViewController {
+            endChildControllerTransition(childController)
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
-        topViewController?.beginAppearanceTransition(false, animated: animated)
+        if let childController = topViewController {
+            beginChildControllerTransition(childController, isAppearing: false, animated: animated)
+        }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
 
-        topViewController?.endAppearanceTransition()
+        if let childController = topViewController {
+            endChildControllerTransition(childController)
+        }
     }
 
     // MARK: - Autorotation
@@ -169,22 +196,26 @@ class RootContainerViewController: UIViewController {
         )
     }
 
-    func pushViewController(_ viewController: UIViewController, animated: Bool) {
+    func pushViewController(_ viewController: UIViewController, animated: Bool, completion: CompletionHandler? = nil) {
         var newViewControllers = viewControllers.filter({ $0 != viewController })
         newViewControllers.append(viewController)
 
-        setViewControllersInternal(newViewControllers, isUnwinding: false, animated: animated)
+        setViewControllersInternal(newViewControllers, isUnwinding: false, animated: animated, completion: completion)
     }
 
-    func popToRootViewController(animated: Bool) {
+    func popToRootViewController(animated: Bool, completion: CompletionHandler? = nil) {
         if let rootController = self.viewControllers.first, self.viewControllers.count > 1 {
-            setViewControllersInternal([rootController], isUnwinding: true, animated: animated)
+            setViewControllersInternal([rootController], isUnwinding: true, animated: animated, completion: completion)
         }
     }
 
     /// Request the root container to query the top controller for the new header bar style
     func updateHeaderBarAppearance() {
         updateHeaderBarStyleFromChildPreferences(animated: UIView.areAnimationsEnabled)
+    }
+
+    func updateHeaderBarHiddenAppearance() {
+        updateHeaderBarHiddenFromChildPreferences(animated: UIView.areAnimationsEnabled)
     }
 
     /// Request to display settings controller
@@ -195,6 +226,55 @@ class RootContainerViewController: UIViewController {
     /// Enable or disable the settings bar button displayed in the header bar
     func setEnableSettingsButton(_ isEnabled: Bool) {
         headerBarView.settingsButton.isEnabled = isEnabled
+        presentationContainerSettingsButton?.isEnabled = isEnabled
+    }
+
+    /// Add settings bar button into the presentation container to make settings accessible even
+    /// when the root container is covered with modal.
+    func addSettingsButtonToPresentationContainer(_ presentationContainer: UIView) {
+        let settingsButton: UIButton
+
+        if let transitionViewSettingsButton = presentationContainerSettingsButton {
+            transitionViewSettingsButton.removeFromSuperview()
+            settingsButton = transitionViewSettingsButton
+        } else {
+            settingsButton = HeaderBarView.makeSettingsButton()
+            settingsButton.isEnabled = headerBarView.settingsButton.isEnabled
+            settingsButton.addTarget(self, action: #selector(handleSettingsButtonTap), for: .touchUpInside)
+
+            presentationContainerSettingsButton = settingsButton
+        }
+
+        // Hide the settings button inside the header bar to avoid color blending issues
+        headerBarView.settingsButton.alpha = 0
+
+        presentationContainer.addSubview(settingsButton)
+
+        NSLayoutConstraint.activate([
+            settingsButton.centerXAnchor.constraint(equalTo: headerBarView.settingsButton.centerXAnchor),
+            settingsButton.centerYAnchor.constraint(equalTo: headerBarView.settingsButton.centerYAnchor),
+        ])
+    }
+
+    func removeSettingsButtonFromPresentationContainer() {
+        presentationContainerSettingsButton?.removeFromSuperview()
+        headerBarView.settingsButton.alpha = 1
+    }
+
+    func setOverrideHeaderBarHidden(_ isHidden: Bool?, animated: Bool) {
+        overrideHeaderBarHidden = isHidden
+
+        if let isHidden = isHidden {
+            setHeaderBarHidden(isHidden, animated: animated)
+        } else {
+            updateHeaderBarHiddenFromChildPreferences(animated: animated)
+        }
+    }
+
+    // MARK: - Accessibility
+
+    override func accessibilityPerformMagicTap() -> Bool {
+        return delegate?.rootContainerViewAccessibilityPerformMagicTap(self) ?? super.accessibilityPerformMagicTap()
     }
 
     // MARK: - Private
@@ -225,11 +305,7 @@ class RootContainerViewController: UIViewController {
         // Prevent automatic layout margins adjustment as we manually control them.
         headerBarView.insetsLayoutMarginsFromSafeArea = false
 
-        headerBarView.settingsButton.addTarget(
-            self,
-            action: #selector(handleSettingsButtonTap),
-            for: .touchUpInside
-        )
+        headerBarView.settingsButton.addTarget(self, action: #selector(handleSettingsButtonTap), for: .touchUpInside)
 
         view.addSubview(headerBarView)
 
@@ -273,13 +349,17 @@ class RootContainerViewController: UIViewController {
 
             // Finish appearance transition
             if shouldHandleAppearanceEvents {
-                sourceViewController?.endAppearanceTransition()
-                if sourceViewController != targetViewController {
-                    targetViewController?.endAppearanceTransition()
+                if let sourceViewController = sourceViewController {
+                    self.endChildControllerTransition(sourceViewController)
+                }
+
+                if let targetViewController = targetViewController, sourceViewController != targetViewController {
+                    self.endChildControllerTransition(targetViewController)
                 }
             }
 
             self.updateInterfaceOrientation(attemptRotateToDeviceOrientation: true)
+            self.updateAccessibilityElementsAndNotifyScreenChange()
 
             completion?()
         }
@@ -318,9 +398,11 @@ class RootContainerViewController: UIViewController {
 
         // Begin appearance transition
         if shouldHandleAppearanceEvents {
-            sourceViewController?.beginAppearanceTransition(false, animated: shouldAnimate)
-            if sourceViewController != targetViewController {
-                targetViewController?.beginAppearanceTransition(true, animated: shouldAnimate)
+            if let sourceViewController = sourceViewController {
+                beginChildControllerTransition(sourceViewController, isAppearing: false, animated: shouldAnimate)
+            }
+            if let targetViewController = targetViewController, sourceViewController != targetViewController {
+                beginChildControllerTransition(targetViewController, isAppearing: true, animated: shouldAnimate)
             }
         }
 
@@ -385,8 +467,8 @@ class RootContainerViewController: UIViewController {
         }
     }
 
-    private func setHeaderBarStyle(_ style: HeaderBarStyle, animated: Bool) {
-        headerBarStyle = style
+    private func setHeaderBarPresentation(_ presentation: HeaderBarPresentation, animated: Bool) {
+        headerBarPresentation = presentation
 
         let action = {
             self.updateHeaderBarBackground()
@@ -414,16 +496,19 @@ class RootContainerViewController: UIViewController {
     }
 
     private func updateHeaderBarBackground() {
-        headerBarView.backgroundColor = headerBarStyle.backgroundColor()
+        headerBarView.backgroundColor = headerBarPresentation.style.backgroundColor()
+        headerBarView.showsDivider = headerBarPresentation.showsDivider
     }
 
     private func updateHeaderBarStyleFromChildPreferences(animated: Bool) {
         if let conforming = topViewController as? RootContainment {
-            setHeaderBarStyle(conforming.preferredHeaderBarStyle, animated: animated)
+            setHeaderBarPresentation(conforming.preferredHeaderBarPresentation, animated: animated)
         }
     }
 
     private func updateHeaderBarHiddenFromChildPreferences(animated: Bool) {
+        guard overrideHeaderBarHidden == nil else { return }
+
         if let conforming = topViewController as? RootContainment {
             setHeaderBarHidden(conforming.prefersHeaderBarHidden, animated: animated)
         }
@@ -440,6 +525,38 @@ class RootContainerViewController: UIViewController {
                 Self.attemptRotationToDeviceOrientation()
             }
         }
+    }
+
+    private func beginChildControllerTransition(_ controller: UIViewController, isAppearing: Bool, animated: Bool) {
+        if appearingController != controller, isAppearing {
+            appearingController = controller
+            controller.beginAppearanceTransition(isAppearing, animated: animated)
+        }
+
+        if disappearingController != controller, !isAppearing {
+            disappearingController = controller
+            controller.beginAppearanceTransition(isAppearing, animated: animated)
+        }
+    }
+
+    private func endChildControllerTransition(_ controller: UIViewController) {
+        if controller == appearingController {
+            appearingController = nil
+            controller.endAppearanceTransition()
+        }
+
+        if controller == disappearingController {
+            disappearingController = nil
+            controller.endAppearanceTransition()
+        }
+    }
+
+    private func updateAccessibilityElementsAndNotifyScreenChange() {
+        // Update accessibility elements to define the correct navigation order: header bar, content view.
+        view.accessibilityElements = [headerBarView, topViewController?.view].compactMap { $0 }
+
+        // Tell accessibility that the significant part of screen was changed.
+        UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
 
 }
@@ -468,6 +585,10 @@ extension UIViewController {
 
     func setNeedsHeaderBarStyleAppearanceUpdate() {
         rootContainerController?.updateHeaderBarAppearance()
+    }
+
+    func setNeedsHeaderBarHiddenAppearanceUpdate() {
+        rootContainerController?.updateHeaderBarHiddenAppearance()
     }
 
 }

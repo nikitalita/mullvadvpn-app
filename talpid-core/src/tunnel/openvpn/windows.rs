@@ -134,6 +134,7 @@ impl fmt::Debug for WintunAdapter {
 }
 
 unsafe impl Send for WintunAdapter {}
+unsafe impl Sync for WintunAdapter {}
 
 impl WintunAdapter {
     pub fn open(dll_handle: Arc<WintunDll>, pool: &U16CStr, name: &U16CStr) -> io::Result<Self> {
@@ -398,6 +399,7 @@ pub fn string_from_guid(guid: &GUID) -> String {
     }
 }
 
+/// Returns the registry key for a network device identified by its GUID.
 pub fn find_adapter_registry_key(find_guid: &str, permissions: REGSAM) -> io::Result<RegKey> {
     let net_devs = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(
         r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}",

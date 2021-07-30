@@ -10,7 +10,40 @@ import UIKit
 
 class AccountInputGroupView: UIView {
 
-    let textField: AccountTextField = {
+    enum Style {
+        case normal, error, authenticating
+    }
+
+    var onSendButton: ((AccountInputGroupView) -> Void)?
+
+    let sendButton: UIButton = {
+        let button = UIButton(type: .custom)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setImage(UIImage(named: "IconArrow"), for: .normal)
+        button.accessibilityLabel = NSLocalizedString(
+            "ACCOUNT_INPUT_LOGIN_BUTTON_ACCESSIBILITY_LABEL",
+            tableName: "AccountInput",
+            value: "Log in",
+            comment: "Accessibility label for submit button in account token input."
+        )
+        return button
+    }()
+
+    var textField: UITextField {
+        return privateTextField
+    }
+
+    var parsedToken: String {
+        return privateTextField.parsedToken
+    }
+
+    let minimumAccountTokenLength = 10
+
+    var satisfiesMinimumTokenLengthRequirement: Bool {
+        return privateTextField.parsedToken.count > minimumAccountTokenLength
+    }
+
+    private let privateTextField: AccountTextField = {
         let textField = AccountTextField()
         textField.font = UIFont.systemFont(ofSize: 20)
         textField.translatesAutoresizingMaskIntoConstraints = false
@@ -32,16 +65,13 @@ class AccountInputGroupView: UIView {
         return textField
     }()
 
-    enum Style {
-        case normal, error, authenticating
-    }
+    private let contentView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
 
-    var loginState = LoginState.default {
-        didSet {
-            updateAppearance()
-            updateTextFieldEnabled()
-        }
-    }
+    private(set) var loginState = LoginState.default
 
     private let borderRadius = CGFloat(8)
     private let borderWidth = CGFloat(2)
@@ -49,7 +79,7 @@ class AccountInputGroupView: UIView {
     private var borderColor: UIColor {
         switch loginState {
         case .default:
-            return textField.isEditing
+            return privateTextField.isEditing
                 ? UIColor.AccountTextField.NormalState.borderColor
                 : UIColor.clear
 
@@ -88,28 +118,83 @@ class AccountInputGroupView: UIView {
     }
 
     private let borderLayer = CAShapeLayer()
-    private let backgroundLayer = CAShapeLayer()
-    private let maskLayer = CALayer()
+    private let contentLayerMask = CALayer()
 
     // MARK: - View lifecycle
 
     override init(frame: CGRect) {
         super.init(frame: frame)
 
-        addSubview(textField)
+        addSubview(contentView)
+        contentView.addSubview(privateTextField)
+        contentView.addSubview(sendButton)
 
         NSLayoutConstraint.activate([
-            textField.topAnchor.constraint(equalTo: topAnchor),
-            textField.leadingAnchor.constraint(equalTo: leadingAnchor),
-            textField.trailingAnchor.constraint(equalTo: trailingAnchor),
-            textField.bottomAnchor.constraint(equalTo: bottomAnchor),
+            contentView.topAnchor.constraint(equalTo: topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            sendButton.topAnchor.constraint(equalTo: contentView.topAnchor),
+            sendButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            sendButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            sendButton.widthAnchor.constraint(equalTo: sendButton.heightAnchor),
+
+            privateTextField.topAnchor.constraint(equalTo: contentView.topAnchor),
+            privateTextField.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            privateTextField.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor),
+            privateTextField.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
         ])
 
-        setupView()
+        backgroundColor = UIColor.clear
+        borderLayer.lineWidth = borderWidth
+        borderLayer.fillColor = UIColor.clear.cgColor
+        contentView.layer.mask = contentLayerMask
+
+        layer.insertSublayer(borderLayer, at: 0)
+
+        updateAppearance()
+        updateTextFieldEnabled()
+        updateSendButtonAppearance(animated: false)
+        updateKeyboardReturnKeyEnabled()
+
+        addTextFieldNotificationObservers()
+        addAccessibilityNotificationObservers()
+        sendButton.addTarget(self, action: #selector(handleSendButton(_:)), for: .touchUpInside)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func setLoginState(_ state: LoginState, animated: Bool) {
+        loginState = state
+
+        updateAppearance()
+        updateTextFieldEnabled()
+        updateSendButtonAppearance(animated: animated)
+    }
+
+    func setOnReturnKey(_ onReturnKey: ((AccountInputGroupView) -> Bool)?) {
+        if let onReturnKey = onReturnKey {
+            privateTextField.onReturnKey = { [weak self] _ -> Bool in
+                guard let self = self else { return true }
+
+                return onReturnKey(self)
+            }
+        } else {
+            privateTextField.onReturnKey = nil
+        }
+    }
+
+    func setToken(_ token: String) {
+        privateTextField.autoformattingText = token
+        updateSendButtonAppearance(animated: false)
+    }
+
+    func clearToken() {
+        privateTextField.autoformattingText = ""
+        updateSendButtonAppearance(animated: false)
     }
 
     // MARK: - CALayerDelegate
@@ -126,42 +211,33 @@ class AccountInputGroupView: UIView {
         let borderPath = borderBezierPath(size: borderFrame.size)
 
         // update the background layer mask
-        maskLayer.frame.size = borderFrame.size
-        maskLayer.contents = backgroundMaskImage(borderPath: borderPath).cgImage
-
-        backgroundLayer.frame = borderFrame
+        contentLayerMask.frame = borderFrame
+        contentLayerMask.contents = backgroundMaskImage(borderPath: borderPath).cgImage
 
         borderLayer.path = borderPath.cgPath
         borderLayer.frame = borderFrame
     }
 
-    // MARK: - Notifications
+    // MARK: - Actions
 
-    @objc func textDidBeginEditing() {
+    @objc private func textDidBeginEditing() {
         updateAppearance()
     }
 
-    @objc func textDidEndEditing() {
+    @objc private func textDidChange() {
+        updateSendButtonAppearance(animated: true)
+        updateKeyboardReturnKeyEnabled()
+    }
+
+    @objc private func textDidEndEditing() {
         updateAppearance()
+    }
+
+    @objc private func handleSendButton(_ sender: Any) {
+        onSendButton?(self)
     }
 
     // MARK: - Private
-
-    private func setupView() {
-        backgroundColor = UIColor.clear
-
-        borderLayer.lineWidth = borderWidth
-        borderLayer.fillColor = UIColor.clear.cgColor
-        backgroundLayer.mask = maskLayer
-
-        layer.insertSublayer(borderLayer, at: 0)
-        layer.insertSublayer(backgroundLayer, at: 0)
-
-        updateAppearance()
-        updateTextFieldEnabled()
-
-        addTextFieldNotificationObservers()
-    }
 
     private func addTextFieldNotificationObservers() {
         let notificationCenter = NotificationCenter.default
@@ -169,28 +245,70 @@ class AccountInputGroupView: UIView {
         notificationCenter.addObserver(self,
                                        selector: #selector(textDidBeginEditing),
                                        name: UITextField.textDidBeginEditingNotification,
-                                       object: textField)
+                                       object: privateTextField)
+        notificationCenter.addObserver(self,
+                                       selector: #selector(textDidChange),
+                                       name: UITextField.textDidChangeNotification,
+                                       object: privateTextField)
         notificationCenter.addObserver(self,
                                        selector: #selector(textDidEndEditing),
                                        name: UITextField.textDidEndEditingNotification,
-                                       object: textField)
+                                       object: privateTextField)
     }
 
     private func updateAppearance() {
         borderLayer.strokeColor = borderColor.cgColor
-        backgroundLayer.backgroundColor = backgroundLayerColor.cgColor
-        textField.textColor = textColor
+        contentView.backgroundColor = backgroundLayerColor
+        privateTextField.textColor = textColor
     }
 
     private func updateTextFieldEnabled() {
         switch loginState {
         case .authenticating, .success:
-            textField.isEnabled = false
+            privateTextField.isEnabled = false
 
-        default:
-            textField.isEnabled = true
+        case .default, .failure:
+            privateTextField.isEnabled = true
         }
-     }
+    }
+
+    private func updateSendButtonAppearance(animated: Bool) {
+        let actions = {
+            switch self.loginState {
+            case .authenticating, .success:
+                // Always show the send button when voice over is running to make it discoverable
+                self.sendButton.alpha = UIAccessibility.isVoiceOverRunning ? 1 : 0
+
+                self.sendButton.isEnabled = false
+                self.sendButton.backgroundColor = .lightGray
+
+            case .default, .failure:
+                let isEnabled = self.satisfiesMinimumTokenLengthRequirement
+
+                // Always show the send button when voice over is running to make it discoverable
+                if UIAccessibility.isVoiceOverRunning {
+                    self.sendButton.alpha = 1
+                } else {
+                    self.sendButton.alpha = isEnabled ? 1 : 0
+                }
+
+                self.sendButton.isEnabled = isEnabled
+                self.sendButton.backgroundColor = isEnabled ? .successColor : .lightGray
+            }
+        }
+
+        if animated {
+            UIView.animate(withDuration: 0.25) {
+                actions()
+            }
+        } else {
+            actions()
+        }
+    }
+
+    private func updateKeyboardReturnKeyEnabled() {
+        privateTextField.enableReturnKey = satisfiesMinimumTokenLengthRequirement
+    }
 
     private func borderBezierPath(size: CGSize) -> UIBezierPath {
         let borderPath = UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: borderRadius)
@@ -208,4 +326,15 @@ class AccountInputGroupView: UIView {
             borderPath.stroke(with: .clear, alpha: 0)
         }
     }
+
+    // MARK: - Accessibility
+
+    private func addAccessibilityNotificationObservers() {
+        NotificationCenter.default.addObserver(self, selector: #selector(voiceOverStatusDidChange(_:)), name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
+    }
+
+    @objc private func voiceOverStatusDidChange(_ notification: Notification) {
+        updateSendButtonAppearance(animated: true)
+    }
+
 }

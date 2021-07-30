@@ -10,11 +10,13 @@ import {
   shell,
   Tray,
 } from 'electron';
+import os from 'os';
 import * as path from 'path';
 import { sprintf } from 'sprintf-js';
 import * as uuid from 'uuid';
 import config from '../config.json';
-import { hasExpired } from '../shared/account-expiry';
+import { closeToExpiry, hasExpired } from '../shared/account-expiry';
+import { IApplication } from '../shared/application-types';
 import BridgeSettingsBuilder from '../shared/bridge-settings-builder';
 import {
   AccountToken,
@@ -47,7 +49,6 @@ import {
   UnsupportedVersionNotificationProvider,
   UpdateAvailableNotificationProvider,
 } from '../shared/notifications/notification';
-import consumePromise from '../shared/promise';
 import { Scheduler } from '../shared/scheduler';
 import AccountDataCache from './account-data-cache';
 import { getOpenAtLogin, setOpenAtLogin } from './autostart';
@@ -74,8 +75,9 @@ import TrayIconController, { TrayIconType } from './tray-icon-controller';
 import WindowController from './window-controller';
 import { ITranslations } from '../shared/ipc-schema';
 
-// Only import when running app on Linux.
+// Only import split tunneling library on correct OS.
 const linuxSplitTunneling = process.platform === 'linux' && require('./linux-split-tunneling');
+const windowsSplitTunneling = process.platform === 'win32' && require('./windows-split-tunneling');
 
 const DAEMON_RPC_PATH =
   process.platform === 'win32' ? 'unix:////./pipe/Mullvad VPN' : 'unix:///var/run/mullvad-vpn';
@@ -107,6 +109,10 @@ class ApplicationMain {
   private tray?: Tray;
   private trayIconController?: TrayIconController;
 
+  // True while file pickers are displayed which is used to decide if the Browser window should be
+  // hidden when losing focus.
+  private browsingFiles = false;
+
   private daemonRpc = new DaemonRpc(DAEMON_RPC_PATH);
   private daemonEventListener?: SubscriptionListener<DaemonEvent>;
   private reconnectBackoff = new ReconnectionBackoff();
@@ -114,7 +120,7 @@ class ApplicationMain {
   private quitStage = AppQuitStage.unready;
 
   private accountData?: IAccountData = undefined;
-  private accountHistory: AccountToken[] = [];
+  private accountHistory?: AccountToken = undefined;
   private tunnelState: TunnelState = { state: 'disconnected' };
   private settings: ISettings = {
     accountToken: undefined,
@@ -122,6 +128,10 @@ class ApplicationMain {
     autoConnect: false,
     blockWhenDisconnected: false,
     showBetaReleases: false,
+    splitTunnel: {
+      enableExclusions: false,
+      appsList: [],
+    },
     relaySettings: {
       normal: {
         location: 'any',
@@ -152,8 +162,14 @@ class ApplicationMain {
         mtu: undefined,
       },
       dns: {
-        custom: false,
-        addresses: [],
+        state: 'default',
+        defaultOptions: {
+          blockAds: false,
+          blockTrackers: false,
+        },
+        customOptions: {
+          addresses: [],
+        },
       },
     },
   };
@@ -189,10 +205,16 @@ class ApplicationMain {
       return this.daemonRpc.getAccountData(accountToken);
     },
     (accountData) => {
-      this.accountData = accountData;
+      this.accountData = accountData && {
+        ...accountData,
+        previousExpiry:
+          accountData.expiry !== this.accountData?.expiry
+            ? this.accountData?.expiry
+            : this.accountData?.previousExpiry,
+      };
 
       if (this.windowController) {
-        IpcMainEventChannel.account.notify(this.windowController.webContents, accountData);
+        IpcMainEventChannel.account.notify(this.windowController.webContents, this.accountData);
       }
 
       this.handleAccountExpiry();
@@ -204,6 +226,8 @@ class ApplicationMain {
 
   private rendererLog?: Logger;
   private translations: ITranslations = { locale: this.locale };
+
+  private windowsSplitTunnelingApplications?: IApplication[];
 
   public run() {
     // Remove window animations to combat window flickering when opening window. Can be removed when
@@ -220,7 +244,7 @@ class ApplicationMain {
 
     this.initLogging();
 
-    log.debug(`Chromium sandbox disabled: ${SANDBOX_DISABLED}`);
+    log.debug(`Chromium sandbox is ${SANDBOX_DISABLED ? 'disabled' : 'enabled'}`);
     if (!SANDBOX_DISABLED) {
       app.enableSandbox();
     }
@@ -229,6 +253,14 @@ class ApplicationMain {
 
     if (process.platform === 'win32') {
       app.setAppUserModelId('net.mullvad.vpn');
+    }
+
+    // While running in development the watch script triggers a reload of the renderer by sending
+    // the signal `SIGUSR2`.
+    if (process.env.NODE_ENV === 'development') {
+      process.on('SIGUSR2', () => {
+        this.windowController?.window?.reload();
+      });
     }
 
     this.guiSettings.load();
@@ -392,7 +424,7 @@ class ApplicationMain {
     // Blocks navigation since it's not needed.
     this.blockNavigation();
 
-    this.translations = this.updateCurrentLocale();
+    this.updateCurrentLocale();
 
     this.daemonRpc.addConnectionObserver(
       new ConnectionObserver(this.onDaemonConnected, this.onDaemonDisconnected),
@@ -470,20 +502,14 @@ class ApplicationMain {
 
       const filePath = path.resolve(path.join(__dirname, '../renderer/index.html'));
       try {
-        if (process.env.NODE_ENV === 'development') {
-          await this.windowController.window.loadURL(
-            'http://localhost:8080/src/renderer/index.html',
-          );
-        } else {
-          await this.windowController.window.loadFile(filePath);
-        }
+        await this.windowController.window.loadFile(filePath);
       } catch (error) {
         log.error(`Failed to load index file: ${error.message}`);
       }
 
       // disable pinch to zoom
       if (this.windowController.webContents) {
-        consumePromise(this.windowController.webContents.setVisualZoomLevelLimits(1, 1));
+        void this.windowController.webContents.setVisualZoomLevelLimits(1, 1);
       }
     }
   }
@@ -556,7 +582,7 @@ class ApplicationMain {
     }
 
     // fetch the latest version info in background
-    consumePromise(this.fetchLatestVersion());
+    void this.fetchLatestVersion();
 
     // reset the reconnect backoff when connection established.
     this.reconnectBackoff.reset();
@@ -609,7 +635,7 @@ class ApplicationMain {
   };
 
   private connectToDaemon() {
-    consumePromise(this.daemonRpc.connect());
+    void this.daemonRpc.connect();
   }
 
   private recoverFromBootstrapError(_error?: Error) {
@@ -650,7 +676,7 @@ class ApplicationMain {
     return daemonEventListener;
   }
 
-  private setAccountHistory(accountHistory: AccountToken[]) {
+  private setAccountHistory(accountHistory?: AccountToken) {
     this.accountHistory = accountHistory;
 
     if (this.windowController) {
@@ -692,7 +718,7 @@ class ApplicationMain {
   private setTunnelState(newState: TunnelState) {
     this.tunnelState = newState;
     this.updateTrayIcon(newState, this.settings.blockWhenDisconnected);
-    consumePromise(this.updateLocation());
+    void this.updateLocation();
 
     if (process.platform === 'linux') {
       this.tray?.setContextMenu(this.createTrayContextMenu());
@@ -701,6 +727,7 @@ class ApplicationMain {
     this.notificationController.notifyTunnelState(
       newState,
       this.settings.blockWhenDisconnected,
+      this.settings.splitTunnel.enableExclusions && this.settings.splitTunnel.appsList.length > 0,
       this.accountData?.expiry,
     );
 
@@ -723,8 +750,8 @@ class ApplicationMain {
     this.updateAccountDataOnAccountChange(oldSettings.accountToken, newSettings.accountToken);
 
     if (oldSettings.accountToken !== newSettings.accountToken) {
-      consumePromise(this.updateAccountHistory());
-      consumePromise(this.fetchWireguardKey());
+      void this.updateAccountHistory();
+      void this.fetchWireguardKey();
     }
 
     if (oldSettings.showBetaReleases !== newSettings.showBetaReleases) {
@@ -733,11 +760,29 @@ class ApplicationMain {
 
     if (this.windowController) {
       IpcMainEventChannel.settings.notify(this.windowController.webContents, newSettings);
+
+      if (windowsSplitTunneling) {
+        void this.updateSplitTunnelingApplications(newSettings.splitTunnel.appsList);
+      }
     }
 
     // since settings can have the relay constraints changed, the relay
     // list should also be updated
     this.setRelays(this.relays, newSettings.relaySettings, newSettings.bridgeState);
+  }
+
+  private async updateSplitTunnelingApplications(appList: string[]): Promise<void> {
+    const { applications } = await windowsSplitTunneling.getApplications({
+      applicationPaths: appList,
+    });
+    this.windowsSplitTunnelingApplications = applications;
+
+    if (this.windowController) {
+      IpcMainEventChannel.windowsSplitTunneling.notify(
+        this.windowController.webContents,
+        applications,
+      );
+    }
   }
 
   private setLocation(newLocation: ILocation) {
@@ -877,10 +922,13 @@ class ApplicationMain {
     const suggestedIsBeta =
       latestVersionInfo.suggestedUpgrade !== undefined &&
       IS_BETA.test(latestVersionInfo.suggestedUpgrade);
-    this.upgradeVersion = {
+
+    const upgradeVersion = {
       ...latestVersionInfo,
       suggestedIsBeta,
     };
+
+    this.upgradeVersion = upgradeVersion;
 
     // notify user to update the app if it became unsupported
     const notificationProviders = [
@@ -903,10 +951,7 @@ class ApplicationMain {
     }
 
     if (this.windowController) {
-      IpcMainEventChannel.upgradeVersion.notify(
-        this.windowController.webContents,
-        latestVersionInfo,
-      );
+      IpcMainEventChannel.upgradeVersion.notify(this.windowController.webContents, upgradeVersion);
     }
   }
 
@@ -997,14 +1042,20 @@ class ApplicationMain {
   }
 
   private registerWindowListener(windowController: WindowController) {
-    windowController.window?.on('show', () => {
+    windowController.window?.on('focus', () => {
       // cancel notifications when window appears
       this.notificationController.cancelPendingNotifications();
 
-      this.updateAccountData();
+      if (
+        !this.accountData ||
+        closeToExpiry(this.accountData.expiry, 4) ||
+        hasExpired(this.accountData.expiry)
+      ) {
+        this.updateAccountData();
+      }
     });
 
-    windowController.window?.on('hide', () => {
+    windowController.window?.on('blur', () => {
       // ensure notification guard is reset
       this.notificationController.resetTunnelStateAnnouncements();
     });
@@ -1012,7 +1063,6 @@ class ApplicationMain {
 
   private registerIpcListeners() {
     IpcMainEventChannel.state.handleGet(() => ({
-      locale: this.locale,
       isConnected: this.connectedToDaemon,
       autoStart: getOpenAtLogin(),
       accountData: this.accountData,
@@ -1033,8 +1083,7 @@ class ApplicationMain {
       guiSettings: this.guiSettings.state,
       wireguardPublicKey: this.wireguardPublicKey,
       translations: this.translations,
-      platform: process.platform,
-      runningInDevelopment: process.env.NODE_ENV === 'development',
+      windowsSplitTunnelingApplications: this.windowsSplitTunnelingApplications,
     }));
 
     IpcMainEventChannel.settings.handleSetAllowLan((allowLan: boolean) =>
@@ -1097,25 +1146,34 @@ class ApplicationMain {
     });
 
     IpcMainEventChannel.guiSettings.handleSetUnpinnedWindow((unpinnedWindow: boolean) => {
-      consumePromise(this.setUnpinnedWindow(unpinnedWindow));
+      void this.setUnpinnedWindow(unpinnedWindow);
     });
 
     IpcMainEventChannel.guiSettings.handleSetPreferredLocale((locale: string) => {
       this.guiSettings.preferredLocale = locale;
-      return Promise.resolve(this.updateCurrentLocale());
+      this.updateCurrentLocale();
+      return Promise.resolve(this.translations);
     });
 
     IpcMainEventChannel.account.handleCreate(() => this.createNewAccount());
     IpcMainEventChannel.account.handleLogin((token: AccountToken) => this.login(token));
     IpcMainEventChannel.account.handleLogout(() => this.logout());
     IpcMainEventChannel.account.handleGetWwwAuthToken(() => this.daemonRpc.getWwwAuthToken());
-    IpcMainEventChannel.account.handleSubmitVoucher((voucherCode: string) =>
-      this.daemonRpc.submitVoucher(voucherCode),
-    );
+    IpcMainEventChannel.account.handleSubmitVoucher(async (voucherCode: string) => {
+      const currentAccountToken = this.settings.accountToken;
+      const response = await this.daemonRpc.submitVoucher(voucherCode);
 
-    IpcMainEventChannel.accountHistory.handleRemoveItem(async (token: AccountToken) => {
-      await this.daemonRpc.removeAccountFromHistory(token);
-      consumePromise(this.updateAccountHistory());
+      if (currentAccountToken) {
+        this.accountDataCache.handleVoucherResponse(currentAccountToken, response);
+      }
+
+      return response;
+    });
+    IpcMainEventChannel.account.handleUpdateData(() => this.updateAccountData());
+
+    IpcMainEventChannel.accountHistory.handleClear(async () => {
+      await this.daemonRpc.clearAccountHistory();
+      void this.updateAccountHistory();
     });
 
     IpcMainEventChannel.wireguardKeys.handleGenerateKey(async () => {
@@ -1127,18 +1185,65 @@ class ApplicationMain {
     });
     IpcMainEventChannel.wireguardKeys.handleVerifyKey(() => this.daemonRpc.verifyWireguardKey());
 
-    IpcMainEventChannel.splitTunneling.handleGetApplications(() => {
+    IpcMainEventChannel.linuxSplitTunneling.handleGetApplications(() => {
       if (linuxSplitTunneling) {
         return linuxSplitTunneling.getApplications(this.locale);
       } else {
-        throw Error('linuxSplitTunneling called without being imported');
+        throw Error('linuxSplitTunneling.getApplications function called without being imported');
       }
     });
-    IpcMainEventChannel.splitTunneling.handleLaunchApplication((application) => {
+    IpcMainEventChannel.windowsSplitTunneling.handleGetApplications((updateCaches: boolean) => {
+      if (windowsSplitTunneling) {
+        return windowsSplitTunneling.getApplications({
+          updateCaches,
+        });
+      } else {
+        throw Error('windowsSplitTunneling.getApplications function called without being imported');
+      }
+    });
+    IpcMainEventChannel.linuxSplitTunneling.handleLaunchApplication((application) => {
       if (linuxSplitTunneling) {
         return linuxSplitTunneling.launchApplication(application);
       } else {
-        throw Error('linuxSplitTunneling called without being imported');
+        throw Error('linuxSplitTunneling.launchApplication function called without being imported');
+      }
+    });
+
+    IpcMainEventChannel.windowsSplitTunneling.handleSetState((enabled) => {
+      if (windowsSplitTunneling) {
+        return this.daemonRpc.setSplitTunnelingState(enabled);
+      } else {
+        throw Error('windowsSplitTunneling.setState function called without being imported');
+      }
+    });
+    IpcMainEventChannel.windowsSplitTunneling.handleAddApplication(async (application) => {
+      if (windowsSplitTunneling) {
+        // If the applications is a string (path) it's an application picked with the file picker
+        // that we want to add to the list of additional applications.
+        if (typeof application === 'string') {
+          this.guiSettings.addBrowsedForSplitTunnelingApplications(application);
+          const applicationPath = await windowsSplitTunneling.addApplicationPathToCache(
+            application,
+          );
+          await this.daemonRpc.addSplitTunnelingApplication(applicationPath);
+        } else {
+          await this.daemonRpc.addSplitTunnelingApplication(application.absolutepath);
+        }
+      } else {
+        throw Error(
+          'windowsSplitTunneling.handleAddApplication function called without being imported',
+        );
+      }
+    });
+    IpcMainEventChannel.windowsSplitTunneling.handleRemoveApplication((application) => {
+      if (windowsSplitTunneling) {
+        return this.daemonRpc.removeSplitTunnelingApplication(
+          typeof application === 'string' ? application : application.absolutepath,
+        );
+      } else {
+        throw Error(
+          'windowsSplitTunneling.handleRemoveApplication function called without being imported',
+        );
       }
     });
 
@@ -1147,8 +1252,8 @@ class ApplicationMain {
       const reportPath = this.getProblemReportPath(id);
       const executable = resolveBin('mullvad-problem-report');
       const args = ['collect', '--output', reportPath];
-      if (toRedact.length > 0) {
-        args.push('--redact', ...toRedact);
+      if (toRedact) {
+        args.push('--redact', toRedact);
       }
 
       return new Promise((resolve, reject) => {
@@ -1200,7 +1305,21 @@ class ApplicationMain {
         await shell.openExternal(url);
       }
     });
-    IpcMainEventChannel.app.handleShowOpenDialog((options) => dialog.showOpenDialog(options));
+    IpcMainEventChannel.app.handleShowOpenDialog(async (options) => {
+      this.browsingFiles = true;
+      const response = await dialog.showOpenDialog({
+        defaultPath: app.getPath('home'),
+        ...options,
+      });
+      this.browsingFiles = false;
+      return response;
+    });
+
+    if (windowsSplitTunneling) {
+      this.guiSettings.browsedForSplitTunnelingApplications.forEach(
+        windowsSplitTunneling.addApplicationPathToCache,
+      );
+    }
   }
 
   private async createNewAccount(): Promise<string> {
@@ -1247,7 +1366,7 @@ class ApplicationMain {
     if (this.autoConnectOnWireguardKeyEvent) {
       this.autoConnectOnWireguardKeyEvent = false;
       this.autoConnectFallbackScheduler.cancel();
-      consumePromise(this.autoConnect());
+      void this.autoConnect();
     }
   }
 
@@ -1364,7 +1483,7 @@ class ApplicationMain {
   private updateDaemonsAutoConnect() {
     const daemonAutoConnect = this.guiSettings.autoConnect && getOpenAtLogin();
     if (daemonAutoConnect !== this.settings.autoConnect) {
-      consumePromise(this.daemonRpc.setAutoConnect(daemonAutoConnect));
+      void this.daemonRpc.setAutoConnect(daemonAutoConnect);
     }
   }
 
@@ -1406,7 +1525,8 @@ class ApplicationMain {
 
     const messagesTranslations = loadTranslations(this.locale, messages);
     const relayLocationsTranslations = loadTranslations(this.locale, relayLocations);
-    return {
+
+    this.translations = {
       locale: this.locale,
       messages: messagesTranslations,
       relayLocations: relayLocationsTranslations,
@@ -1460,13 +1580,8 @@ class ApplicationMain {
   private allowDevelopmentRequest(url: string): boolean {
     return (
       process.env.NODE_ENV === 'development' &&
-      // Local web server providing assests (index.html, index.js and css files)
-      (url.startsWith('http://localhost:8080/') ||
-        // Automatic reloading performed by the browser-sync module
-        url.startsWith('ws://localhost:35829/browser-sync') ||
-        url.startsWith('http://localhost:35829/browser-sync/') ||
-        // Downloading of React and Redux developer tools.
-        url.startsWith('devtools://devtools/') ||
+      // Downloading of React and Redux developer tools.
+      (url.startsWith('devtools://devtools/') ||
         url.startsWith('chrome-extension://') ||
         url.startsWith('https://clients2.google.com') ||
         url.startsWith('https://clients2.googleusercontent.com'))
@@ -1482,40 +1597,64 @@ class ApplicationMain {
   }
 
   private async installDevTools() {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const installer = require('electron-devtools-installer');
-    const extensions = ['REACT_DEVELOPER_TOOLS', 'REDUX_DEVTOOLS'];
+    const { default: installer, REACT_DEVELOPER_TOOLS, REDUX_DEVTOOLS } = await import(
+      'electron-devtools-installer'
+    );
     const forceDownload = !!process.env.UPGRADE_EXTENSIONS;
-    for (const name of extensions) {
-      try {
-        await installer.default(installer[name], forceDownload);
-      } catch (e) {
-        log.info(`Error installing ${name} extension: ${e.message}`);
+    const options = { forceDownload, loadExtensionOptions: { allowFileAccess: true } };
+    try {
+      await installer(REACT_DEVELOPER_TOOLS, options);
+      await installer(REDUX_DEVTOOLS, options);
+    } catch (e) {
+      log.info(`Error installing extension: ${e.message}`);
+    }
+  }
+
+  // On both Linux and Windows the app height is applied incorrectly:
+  // https://github.com/electron/electron/issues/28777
+  private getContentHeight(): number {
+    // The height we want achieve.
+    const contentHeight = 568;
+
+    switch (process.platform) {
+      case 'darwin': {
+        // The size of transparent area around arrow on macOS.
+        const headerBarArrowHeight = 12;
+
+        return this.guiSettings.unpinnedWindow
+          ? contentHeight
+          : contentHeight + headerBarArrowHeight;
       }
+      case 'win32':
+        // On Windows the app height ends up slightly lower than we set it to if running in unpinned
+        // mode and the app becomes a tiny bit taller when pinned to task bar.
+        return this.guiSettings.unpinnedWindow ? contentHeight + 19 : contentHeight - 1;
+      case 'linux':
+        // On Linux the app ends up slightly lower than we set it to.
+        return contentHeight - 25;
+      default:
+        return contentHeight;
     }
   }
 
   private async createWindow(): Promise<BrowserWindow> {
-    const contentHeight = 568;
-    // the size of transparent area around arrow on macOS
-    const headerBarArrowHeight = 12;
-    const height =
-      process.platform === 'darwin' && !this.guiSettings.unpinnedWindow
-        ? contentHeight + headerBarArrowHeight
-        : contentHeight;
+    const height = this.getContentHeight();
+    const width = 320;
 
     const options: Electron.BrowserWindowConstructorOptions = {
-      width: 320,
-      minWidth: 320,
+      useContentSize: true,
+      width,
+      minWidth: width,
+      maxWidth: width,
       height,
       minHeight: height,
+      maxHeight: height,
       resizable: false,
       maximizable: false,
       fullscreenable: false,
       show: false,
       frame: this.guiSettings.unpinnedWindow,
       transparent: !this.guiSettings.unpinnedWindow,
-      useContentSize: true,
       webPreferences: {
         preload: path.join(__dirname, '../renderer/preloadBundle.js'),
         nodeIntegration: false,
@@ -1534,8 +1673,6 @@ class ApplicationMain {
         // setup window flags to mimic popover on macOS
         const appWindow = new BrowserWindow({
           ...options,
-          height: contentHeight + headerBarArrowHeight,
-          minHeight: contentHeight + headerBarArrowHeight,
           titleBarStyle: this.guiSettings.unpinnedWindow ? 'default' : 'customButtonsOnHover',
           minimizable: this.guiSettings.unpinnedWindow,
           closable: this.guiSettings.unpinnedWindow,
@@ -1544,7 +1681,7 @@ class ApplicationMain {
         // make the window visible on all workspaces and prevent the icon from showing in the dock
         // and app switcher.
         if (this.guiSettings.unpinnedWindow) {
-          consumePromise(app.dock.show());
+          void app.dock.show();
         } else {
           appWindow.setVisibleOnAllWorkspaces(true);
           app.dock.hide();
@@ -1633,16 +1770,16 @@ class ApplicationMain {
           if (this.tunnelState.state === 'disconnected') {
             // Workaround: gRPC calls are sometimes delayed by a few seconds and setImmediate
             // mitigates this. https://github.com/grpc/grpc-node/issues/882
-            setImmediate(() => consumePromise(this.daemonRpc.connectTunnel()));
+            setImmediate(() => void this.daemonRpc.connectTunnel());
           } else {
-            setImmediate(() => consumePromise(this.daemonRpc.disconnectTunnel()));
+            setImmediate(() => void this.daemonRpc.disconnectTunnel());
           }
         },
       },
       {
         label: messages.gettext('Reconnect'),
         enabled: this.tunnelState.state === 'connected' || this.tunnelState.state === 'connecting',
-        click: () => setImmediate(() => consumePromise(this.daemonRpc.reconnectTunnel())),
+        click: () => setImmediate(() => void this.daemonRpc.reconnectTunnel()),
       },
     ];
 
@@ -1731,7 +1868,19 @@ class ApplicationMain {
       }
       this.tray?.on('click', () => this.windowController?.show());
     } else {
-      this.tray?.on('click', () => this.windowController?.toggle());
+      this.tray?.on('click', () => {
+        const isMacOsBigSur = process.platform === 'darwin' && parseInt(os.release(), 10) >= 20;
+        if (isMacOsBigSur && !this.windowController?.isVisible()) {
+          // This is a workaround for this Electron issue, when it's resolved
+          // `this.windowController?.toggle()` should do the trick on all platforms:
+          // https://github.com/electron/electron/issues/28776
+          const contextMenu = Menu.buildFromTemplate([]);
+          contextMenu.on('menu-will-show', () => this.windowController?.show());
+          this.tray?.popUpContextMenu(contextMenu);
+        } else {
+          this.windowController?.toggle();
+        }
+      });
       this.tray?.on('right-click', () => this.windowController?.hide());
     }
   }
@@ -1747,7 +1896,7 @@ class ApplicationMain {
           cursorPos.y >= trayBounds.y &&
           cursorPos.x <= trayBounds.x + trayBounds.width &&
           cursorPos.y <= trayBounds.y + trayBounds.height;
-        if (!isCursorInside) {
+        if (!isCursorInside && !this.browsingFiles) {
           windowController.hide();
         }
       });

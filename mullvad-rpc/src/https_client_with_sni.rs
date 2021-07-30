@@ -23,6 +23,8 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+#[cfg(target_os = "android")]
+use tokio::net::TcpSocket;
 
 use tokio::{net::TcpStream as TokioTcpStream, runtime::Handle, time::timeout};
 use tokio_rustls::rustls::{self, ProtocolVersion};
@@ -122,12 +124,10 @@ impl HttpsConnectorWithSni {
         addr: SocketAddr,
         socket_bypass_tx: Option<mpsc::Sender<SocketBypassRequest>>,
     ) -> std::io::Result<TokioTcpStream> {
-        use socket2::{Domain, Protocol, Socket, Type};
-        let domain = match addr {
-            SocketAddr::V4(_) => Domain::ipv4(),
-            SocketAddr::V6(_) => Domain::ipv6(),
+        let socket = match addr {
+            SocketAddr::V4(_) => TcpSocket::new_v4()?,
+            SocketAddr::V6(_) => TcpSocket::new_v6()?,
         };
-        let socket = Socket::new(domain, Type::stream(), Some(Protocol::tcp()))?.into_tcp_stream();
 
         if let Some(mut tx) = socket_bypass_tx {
             let (done_tx, done_rx) = oneshot::channel();
@@ -137,37 +137,34 @@ impl HttpsConnectorWithSni {
             }
         }
 
-        timeout(CONNECT_TIMEOUT, TokioTcpStream::connect_std(socket, &addr))
+        timeout(CONNECT_TIMEOUT, TokioTcpStream::connect(addr))
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))?
     }
 
-    async fn resolve_address(hostname: &str) -> io::Result<SocketAddr> {
-        match Self::parse_addr(&hostname) {
-            Some(addr) => Ok(addr),
-            None => {
-                let mut addrs = GaiResolver::new()
-                    .call(
-                        Name::from_str(&hostname)
-                            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
-                    )
-                    .await
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-                let addr = addrs
-                    .next()
-                    .ok_or(io::Error::new(io::ErrorKind::Other, "Empty DNS response"))?;
-                Ok(SocketAddr::new(addr, 443))
-            }
+    async fn resolve_address(uri: &Uri) -> io::Result<SocketAddr> {
+        let hostname = uri.host().ok_or(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid url, missing host",
+        ))?;
+        let port = uri.port_u16().unwrap_or(443);
+
+        if let Some(addr) = hostname.parse::<IpAddr>().ok() {
+            return Ok(SocketAddr::new(addr, port));
         }
-    }
 
 
-    fn parse_addr(hostname: &str) -> Option<SocketAddr> {
-        if let Ok(addr) = hostname.parse::<SocketAddr>() {
-            return Some(addr);
-        }
-        let ip = hostname.parse::<IpAddr>().ok()?;
-        Some(SocketAddr::new(ip, 443))
+        let mut addrs = GaiResolver::new()
+            .call(
+                Name::from_str(&hostname)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
+            )
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let addr = addrs
+            .next()
+            .ok_or(io::Error::new(io::ErrorKind::Other, "Empty DNS response"))?;
+        Ok(SocketAddr::new(addr.ip(), port))
     }
 }
 
@@ -211,14 +208,11 @@ impl Service<Uri> for HttpsConnectorWithSni {
                     "invalid url, not https",
                 ));
             }
-            let host_addr = uri.host().ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid url, missing host",
-            ))?;
+
             let hostname = sni_hostname?;
             let host = DNSNameRef::try_from_ascii_str(&hostname)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid hostname"))?;
-            let addr = Self::resolve_address(host_addr).await?;
+            let addr = Self::resolve_address(&uri).await?;
 
             let tokio_connection = Self::open_socket(
                 addr,

@@ -3,9 +3,9 @@ import { Provider } from 'react-redux';
 import { Router } from 'react-router';
 import { bindActionCreators } from 'redux';
 
+import AppRouter from './components/AppRouter';
 import ErrorBoundary from './components/ErrorBoundary';
 import { AppContext } from './context';
-import AppRoutes from './routes';
 
 import accountActions from './redux/account/actions';
 import connectionActions from './redux/connection/actions';
@@ -16,14 +16,13 @@ import userInterfaceActions from './redux/userinterface/actions';
 import versionActions from './redux/version/actions';
 
 import { ICurrentAppVersionInfo } from '../shared/ipc-types';
-import { ILinuxSplitTunnelingApplication } from '../shared/application-types';
-import { messages, relayLocations } from '../shared/gettext';
+import { IApplication, ILinuxSplitTunnelingApplication } from '../shared/application-types';
 import { IGuiSettingsState, SYSTEM_PREFERRED_LOCALE_KEY } from '../shared/gui-settings-state';
+import { messages, relayLocations } from '../shared/gettext';
 import log, { ConsoleOutput } from '../shared/logging';
 import { IRelayListPair, LaunchApplicationResult } from '../shared/ipc-schema';
-import consumePromise from '../shared/promise';
 import { Scheduler } from '../shared/scheduler';
-import History from './lib/history';
+import History, { ITransitionSpecification, transitions } from './lib/history';
 import { loadTranslations } from './lib/load-translations';
 
 import {
@@ -46,6 +45,7 @@ import {
 } from '../shared/daemon-rpc-types';
 import { LogLevel } from '../shared/logging-types';
 import IpcOutput from './lib/logging';
+import { RoutePath } from './lib/routes';
 
 // This function wraps all IPC calls to catch errors and then rethrow them without the
 // "Uncaught Error:" prefix that's added by Electron.
@@ -105,7 +105,7 @@ const SUPPORTED_LOCALE_LIST = [
 ];
 
 export default class AppRenderer {
-  private history = new History('/');
+  private history: History;
   private reduxStore = configureStore();
   private reduxActions = {
     account: bindActionCreators(accountActions, this.reduxStore.dispatch),
@@ -137,7 +137,7 @@ export default class AppRenderer {
     });
 
     IpcRendererEventChannel.daemon.listenConnected(() => {
-      consumePromise(this.onDaemonConnected());
+      void this.onDaemonConnected();
     });
 
     IpcRendererEventChannel.daemon.listenDisconnected(() => {
@@ -145,10 +145,10 @@ export default class AppRenderer {
     });
 
     IpcRendererEventChannel.account.listen((newAccountData?: IAccountData) => {
-      this.setAccountExpiry(newAccountData && newAccountData.expiry);
+      this.setAccountExpiry(newAccountData?.expiry, newAccountData?.previousExpiry);
     });
 
-    IpcRendererEventChannel.accountHistory.listen((newAccountHistory: AccountToken[]) => {
+    IpcRendererEventChannel.accountHistory.listen((newAccountHistory?: AccountToken) => {
       this.setAccountHistory(newAccountHistory);
     });
 
@@ -197,6 +197,10 @@ export default class AppRenderer {
       this.reduxActions.settings.setWireguardKeygenEvent(event);
     });
 
+    IpcRendererEventChannel.windowsSplitTunneling.listen((applications: IApplication[]) => {
+      this.reduxActions.settings.setSplitTunnelingApplications(applications);
+    });
+
     IpcRendererEventChannel.windowFocus.listen((focus: boolean) => {
       this.reduxActions.userInterface.setWindowFocused(focus);
     });
@@ -204,10 +208,7 @@ export default class AppRenderer {
     // Request the initial state from the main process
     const initialState = IpcRendererEventChannel.state.get();
 
-    window.platform = initialState.platform;
-    window.runningInDevelopment = initialState.runningInDevelopment;
-
-    this.setLocale(initialState.locale);
+    this.setLocale(initialState.translations.locale);
     loadTranslations(
       messages,
       initialState.translations.locale,
@@ -219,10 +220,13 @@ export default class AppRenderer {
       initialState.translations.relayLocations,
     );
 
-    this.setAccountExpiry(initialState.accountData && initialState.accountData.expiry);
+    this.setAccountExpiry(
+      initialState.accountData?.expiry,
+      initialState.accountData?.previousExpiry,
+    );
+    this.setSettings(initialState.settings);
     this.handleAccountChange(undefined, initialState.settings.accountToken);
     this.setAccountHistory(initialState.accountHistory);
-    this.setSettings(initialState.settings);
     this.setTunnelState(initialState.tunnelState);
     this.updateBlockedState(initialState.tunnelState, initialState.settings.blockWhenDisconnected);
 
@@ -238,17 +242,31 @@ export default class AppRenderer {
     this.setWireguardPublicKey(initialState.wireguardPublicKey);
 
     if (initialState.isConnected) {
-      consumePromise(this.onDaemonConnected());
+      void this.onDaemonConnected();
     }
+
+    this.checkContentHeight();
+
+    if (initialState.windowsSplitTunnelingApplications) {
+      this.reduxActions.settings.setSplitTunnelingApplications(
+        initialState.windowsSplitTunnelingApplications,
+      );
+    }
+
+    const navigationBase = this.getNavigationBase(
+      initialState.isConnected,
+      initialState.settings.accountToken,
+    );
+    this.history = new History(navigationBase);
   }
 
   public renderView() {
     return (
       <AppContext.Provider value={{ app: this }}>
         <Provider store={this.reduxStore}>
-          <Router history={this.history}>
+          <Router history={this.history.asHistory}>
             <ErrorBoundary>
-              <AppRoutes />
+              <AppRouter />
             </ErrorBoundary>
           </Router>
         </Provider>
@@ -303,6 +321,10 @@ export default class AppRenderer {
     return IpcRendererEventChannel.account.submitVoucher(voucherCode);
   }
 
+  public updateAccountData(): void {
+    IpcRendererEventChannel.account.updateData();
+  }
+
   public async connectTunnel(): Promise<void> {
     const state = this.tunnelState.state;
 
@@ -335,8 +357,8 @@ export default class AppRenderer {
     return IpcRendererEventChannel.settings.setDnsOptions(dns);
   }
 
-  public removeAccountFromHistory(accountToken: AccountToken): Promise<void> {
-    return IpcRendererEventChannel.accountHistory.removeItem(accountToken);
+  public clearAccountHistory(): Promise<void> {
+    return IpcRendererEventChannel.accountHistory.clear();
   }
 
   public async openLinkWithAuth(link: string): Promise<void> {
@@ -346,7 +368,7 @@ export default class AppRenderer {
     } catch (e) {
       log.error(`Failed to get the WWW auth token: ${e.message}`);
     }
-    consumePromise(this.openUrl(`${link}?token=${token}`));
+    void this.openUrl(`${link}?token=${token}`);
   }
 
   public async setAllowLan(allowLan: boolean) {
@@ -443,17 +465,33 @@ export default class AppRenderer {
     actions.settings.setWireguardKeygenEvent(keygenEvent);
   }
 
-  public getSplitTunnelingApplications() {
-    return IpcRendererEventChannel.splitTunneling.getApplications();
+  public getLinuxSplitTunnelingApplications() {
+    return IpcRendererEventChannel.linuxSplitTunneling.getApplications();
+  }
+
+  public getWindowsSplitTunnelingApplications(updateCache = false) {
+    return IpcRendererEventChannel.windowsSplitTunneling.getApplications(updateCache);
   }
 
   public launchExcludedApplication(
     application: ILinuxSplitTunnelingApplication | string,
   ): Promise<LaunchApplicationResult> {
-    return IpcRendererEventChannel.splitTunneling.launchApplication(application);
+    return IpcRendererEventChannel.linuxSplitTunneling.launchApplication(application);
   }
 
-  public collectProblemReport(toRedact: string[]): Promise<string> {
+  public setSplitTunnelingState(enabled: boolean): Promise<void> {
+    return IpcRendererEventChannel.windowsSplitTunneling.setState(enabled);
+  }
+
+  public addSplitTunnelingApplication(application: IApplication | string): Promise<void> {
+    return IpcRendererEventChannel.windowsSplitTunneling.addApplication(application);
+  }
+
+  public removeSplitTunnelingApplication(application: IApplication | string) {
+    void IpcRendererEventChannel.windowsSplitTunneling.removeApplication(application);
+  }
+
+  public collectProblemReport(toRedact?: string): Promise<string> {
     return IpcRendererEventChannel.problemReport.collectLogs(toRedact);
   }
 
@@ -518,6 +556,24 @@ export default class AppRenderer {
     const preferredLocale = this.getPreferredLocaleList().find((item) => item.code === localeCode);
 
     return preferredLocale ? preferredLocale.name : '';
+  }
+
+  // Make sure that the content height is correct and log if it isn't. This is mostly for debugging
+  // purposes since there's a bug in Electron that causes the app height to be another value than
+  // the one we have set.
+  // https://github.com/electron/electron/issues/28777
+  private checkContentHeight(): void {
+    let expectedContentHeight = 568;
+
+    // The app content is 12px taller on macOS to fit the top arrow.
+    if (window.env.platform === 'darwin' && !this.guiSettings.unpinnedWindow) {
+      expectedContentHeight += 12;
+    }
+
+    const contentHeight = window.innerHeight;
+    if (contentHeight !== expectedContentHeight) {
+      log.error(`Wrong content height ${contentHeight}, expected ${expectedContentHeight}`);
+    }
   }
 
   private redirectToConnect() {
@@ -598,19 +654,48 @@ export default class AppRenderer {
   }
 
   private resetNavigation() {
-    if (this.connectedToDaemon) {
-      if (this.settings.accountToken) {
-        this.history.resetWithIfDifferent('/connect');
-      } else {
-        this.history.resetWithIfDifferent('/login');
-      }
+    if (this.history) {
+      const pathname = this.history.location.pathname;
+      const nextPath = this.getNavigationBase(this.connectedToDaemon, this.settings.accountToken);
+
+      // First level contains the possible next locations and the second level contains the possible
+      // current locations.
+      const navigationTransitions: {
+        [from: string]: { [to: string]: ITransitionSpecification };
+      } = {
+        '/': {
+          '/login': transitions.pop,
+          '/main': transitions.pop,
+          '*': transitions.dismiss,
+        },
+        '/login': {
+          '/': transitions.push,
+          '/main': transitions.pop,
+          '*': transitions.none,
+        },
+        '/main': {
+          '/': transitions.push,
+          '/login': transitions.push,
+          '*': transitions.dismiss,
+        },
+      };
+
+      const transition =
+        navigationTransitions[nextPath][pathname] ?? navigationTransitions[nextPath]['*'];
+      this.history.reset(nextPath, transition);
+    }
+  }
+
+  private getNavigationBase(connectedToDaemon: boolean, accountToken?: string): RoutePath {
+    if (connectedToDaemon) {
+      return accountToken ? RoutePath.main : RoutePath.login;
     } else {
-      this.history.resetWithIfDifferent('/');
+      return RoutePath.launch;
     }
   }
 
   private async autoConnect() {
-    if (window.runningInDevelopment) {
+    if (window.env.development) {
       log.info('Skip autoconnect in development');
     } else if (this.autoConnected) {
       log.info('Skip autoconnect because it was done before');
@@ -633,7 +718,7 @@ export default class AppRenderer {
     }
   }
 
-  private setAccountHistory(accountHistory: AccountToken[]) {
+  private setAccountHistory(accountHistory?: AccountToken) {
     this.reduxActions.account.updateAccountHistory(accountHistory);
   }
 
@@ -680,6 +765,7 @@ export default class AppRenderer {
     reduxSettings.updateWireguardMtu(newSettings.tunnelOptions.wireguard.mtu);
     reduxSettings.updateBridgeState(newSettings.bridgeState);
     reduxSettings.updateDnsOptions(newSettings.tunnelOptions.dns);
+    reduxSettings.updateSplitTunnelingState(newSettings.splitTunnel.enableExclusions);
 
     this.setRelaySettings(newSettings.relaySettings);
     this.setBridgeSettings(newSettings.bridgeSettings);
@@ -809,8 +895,8 @@ export default class AppRenderer {
     this.reduxActions.settings.updateGuiSettings(guiSettings);
   }
 
-  private setAccountExpiry(expiry?: string) {
-    this.reduxActions.account.updateAccountExpiry(expiry);
+  private setAccountExpiry(expiry?: string, previousExpiry?: string) {
+    this.reduxActions.account.updateAccountExpiry(expiry, previousExpiry);
   }
 
   private storeAutoStart(autoStart: boolean) {

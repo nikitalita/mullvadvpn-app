@@ -8,7 +8,6 @@ import {
   TunnelProtocol,
 } from '../../shared/daemon-rpc-types';
 import { messages } from '../../shared/gettext';
-import consumePromise from '../../shared/promise';
 import { IpAddress } from '../lib/ip';
 import { WgKeyState } from '../redux/settings/reducers';
 import {
@@ -22,9 +21,10 @@ import {
   StyledSelectorForFooter,
   StyledTunnelProtocolContainer,
   StyledCustomDnsSwitchContainer,
-  StyledCustomDnsFotter,
+  StyledCustomDnsFooter,
   StyledAddCustomDnsLabel,
   StyledAddCustomDnsButton,
+  StyledBetaLabel,
 } from './AdvancedSettingsStyles';
 import * as AppButton from './AppButton';
 import { AriaDescription, AriaInput, AriaInputGroup, AriaLabel } from './AriaGroup';
@@ -42,6 +42,7 @@ import {
 import Selector, { ISelectorItem } from './cell/Selector';
 import SettingsHeader, { HeaderTitle } from './SettingsHeader';
 import Accordion from './Accordion';
+import { formatMarkdown } from '../markdown-formatter';
 
 const MIN_MSSFIX_VALUE = 1000;
 const MAX_MSSFIX_VALUE = 1450;
@@ -84,7 +85,7 @@ interface IProps {
   setWireguardRelayPort: (port?: number) => void;
   setDnsOptions: (dns: IDnsOptions) => Promise<void>;
   onViewWireguardKeys: () => void;
-  onViewLinuxSplitTunneling: () => void;
+  onViewSplitTunneling: () => void;
   onClose: () => void;
 }
 
@@ -437,18 +438,21 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
                     </Cell.Label>
                     <Cell.Icon height={12} width={7} source="icon-chevron" />
                   </Cell.CellButton>
+                </StyledButtonCellGroup>
 
-                  {window.platform === 'linux' && (
-                    <Cell.CellButton onClick={this.props.onViewLinuxSplitTunneling}>
+                {(window.env.platform === 'linux' || window.env.platform === 'win32') && (
+                  <StyledButtonCellGroup>
+                    <Cell.CellButton onClick={this.props.onViewSplitTunneling}>
                       <Cell.Label>
+                        {window.env.platform === 'win32' && <StyledBetaLabel />}
                         {messages.pgettext('advanced-settings-view', 'Split tunneling')}
                       </Cell.Label>
                       <Cell.Icon height={12} width={7} source="icon-chevron" />
                     </Cell.CellButton>
-                  )}
-                </StyledButtonCellGroup>
+                  </StyledButtonCellGroup>
+                )}
 
-                <StyledCustomDnsSwitchContainer>
+                <StyledCustomDnsSwitchContainer disabled={!this.customDnsAvailable()}>
                   <AriaInputGroup>
                     <AriaLabel>
                       <Cell.InputLabel>
@@ -458,13 +462,17 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
                     <AriaInput>
                       <Cell.Switch
                         ref={this.customDnsSwitchRef}
-                        isOn={this.props.dns.custom || this.state.showAddCustomDns}
+                        isOn={this.props.dns.state === 'custom' || this.state.showAddCustomDns}
                         onChange={this.setCustomDnsEnabled}
                       />
                     </AriaInput>
                   </AriaInputGroup>
                 </StyledCustomDnsSwitchContainer>
-                <Accordion expanded={this.props.dns.custom || this.state.showAddCustomDns}>
+                <Accordion
+                  expanded={
+                    this.customDnsAvailable() &&
+                    (this.props.dns.state === 'custom' || this.state.showAddCustomDns)
+                  }>
                   <CellList items={this.customDnsItems()} onRemove={this.removeDnsAddress} />
 
                   {this.state.showAddCustomDns && (
@@ -500,14 +508,18 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
                   </StyledAddCustomDnsButton>
                 </Accordion>
 
-                <StyledCustomDnsFotter>
+                <StyledCustomDnsFooter>
                   <Cell.FooterText>
-                    {messages.pgettext(
-                      'advanced-settings-view',
-                      'Enable to add at least one DNS server.',
+                    {this.customDnsAvailable() ? (
+                      messages.pgettext(
+                        'advanced-settings-view',
+                        'Enable to add at least one DNS server.',
+                      )
+                    ) : (
+                      <CustomDnsDisabledMessage />
                     )}
                   </Cell.FooterText>
-                </StyledCustomDnsFotter>
+                </StyledCustomDnsFooter>
               </StyledNavigationScrollbars>
             </NavigationContainer>
           </StyledContainer>
@@ -520,15 +532,22 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
     );
   }
 
+  private customDnsAvailable(): boolean {
+    return (
+      this.props.dns.state === 'custom' ||
+      (!this.props.dns.defaultOptions.blockAds && !this.props.dns.defaultOptions.blockTrackers)
+    );
+  }
+
   private setCustomDnsEnabled = async (enabled: boolean) => {
-    if (this.props.dns.addresses.length > 0) {
+    if (this.props.dns.customOptions.addresses.length > 0) {
       await this.props.setDnsOptions({
-        custom: enabled,
-        addresses: this.props.dns.addresses,
+        ...this.props.dns,
+        state: enabled ? 'custom' : 'default',
       });
     }
 
-    if (enabled && this.props.dns.addresses.length === 0) {
+    if (enabled && this.props.dns.customOptions.addresses.length === 0) {
       this.showAddCustomDnsRow();
     }
 
@@ -538,7 +557,7 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
   };
 
   private customDnsItems(): ICellListItem<string>[] {
-    return this.props.dns.addresses.map((address) => ({
+    return this.props.dns.customOptions.addresses.map((address) => ({
       label: address,
       value: address,
     }));
@@ -579,7 +598,7 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
   };
 
   private confirmPublicDnsAddress = () => {
-    consumePromise(this.addDnsAddress(this.state.publicDnsIpToConfirm!, true));
+    void this.addDnsAddress(this.state.publicDnsIpToConfirm!, true);
     this.hideCustomDnsConfirmationDialog();
   };
 
@@ -589,8 +608,12 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
 
       if (ipAddress.isLocal() || confirmed) {
         await this.props.setDnsOptions({
-          custom: this.props.dns.custom || this.state.showAddCustomDns,
-          addresses: [...this.props.dns.addresses, address],
+          ...this.props.dns,
+          state:
+            this.props.dns.state === 'custom' || this.state.showAddCustomDns ? 'custom' : 'default',
+          customOptions: {
+            addresses: [...this.props.dns.customOptions.addresses, address],
+          },
         });
         this.hideAddCustomDnsRow();
       } else {
@@ -602,13 +625,14 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
   };
 
   private removeDnsAddress = (address: string) => {
-    const addresses = this.props.dns.addresses.filter((item) => item !== address);
-    consumePromise(
-      this.props.setDnsOptions({
-        custom: addresses.length > 0 && this.props.dns.custom,
+    const addresses = this.props.dns.customOptions.addresses.filter((item) => item !== address);
+    void this.props.setDnsOptions({
+      ...this.props.dns,
+      state: addresses.length > 0 && this.props.dns.state === 'custom' ? 'custom' : 'default',
+      customOptions: {
         addresses,
-      }),
-    );
+      },
+    });
   };
 
   private tunnelProtocolItems = (
@@ -757,4 +781,30 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
       (parsedMtu >= MIN_WIREGUARD_MTU_VALUE && parsedMtu <= MAX_WIREGUARD_MTU_VALUE)
     );
   }
+}
+
+function CustomDnsDisabledMessage() {
+  const blockAdsFeatureName = messages.pgettext('preferences-view', 'Block ads');
+  const blockTrackersFeatureName = messages.pgettext('preferences-view', 'Block trackers');
+  const preferencesPageName = messages.pgettext('preferences-nav', 'Preferences');
+
+  // TRANSLATORS: This is displayed when either or both of the block ads/trackers settings are
+  // TRANSLATORS: turned on which makes the custom DNS setting disabled. The text enclosed in "**"
+  // TRANSLATORS: will appear bold.
+  // TRANSLATORS: Available placeholders:
+  // TRANSLATORS: %(blockAdsFeatureName)s - The name displayed next to the "Block ads" toggle.
+  // TRANSLATORS: %(blockTrackersFeatureName)s - The name displayed next to the "Block trackers" toggle.
+  // TRANSLATORS: %(preferencesPageName)s - The page title showed on top in the preferences page.
+  const customDnsDisabledMessage = messages.pgettext(
+    'preferences-view',
+    'Disable **%(blockAdsFeatureName)s** and **%(blockTrackersFeatureName)s** (under %(preferencesPageName)s) to activate this setting.',
+  );
+
+  return formatMarkdown(
+    sprintf(customDnsDisabledMessage, {
+      blockAdsFeatureName,
+      blockTrackersFeatureName,
+      preferencesPageName,
+    }),
+  );
 }

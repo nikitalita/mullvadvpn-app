@@ -8,7 +8,11 @@ use crate::{
     tunnel::{CloseHandle, TunnelEvent, TunnelMetadata},
 };
 use cfg_if::cfg_if;
-use futures::{channel::mpsc, stream::Fuse, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    stream::Fuse,
+    StreamExt,
+};
 use std::net::IpAddr;
 use talpid_types::{
     net::TunnelParameters,
@@ -21,7 +25,8 @@ use crate::tunnel::TunnelMonitor;
 
 use super::connecting_state::TunnelCloseEvent;
 
-pub(crate) type TunnelEventsReceiver = Fuse<mpsc::UnboundedReceiver<TunnelEvent>>;
+pub(crate) type TunnelEventsReceiver =
+    Fuse<mpsc::UnboundedReceiver<(TunnelEvent, oneshot::Sender<()>)>>;
 
 
 pub struct ConnectedStateBootstrap {
@@ -80,7 +85,7 @@ impl ConnectedState {
     #[allow(unused_variables)]
     fn get_dns_servers(&self, shared_values: &SharedTunnelStateValues) -> Vec<IpAddr> {
         #[cfg(not(target_os = "android"))]
-        if let Some(ref servers) = shared_values.custom_dns {
+        if let Some(ref servers) = shared_values.dns_servers {
             servers.clone()
         } else {
             let mut dns_ips = vec![];
@@ -133,13 +138,14 @@ impl ConnectedState {
     }
 
     fn reset_routes(shared_values: &mut SharedTunnelStateValues) {
-        #[cfg(windows)]
-        shared_values.route_manager.clear_default_route_callbacks();
         if let Err(error) = shared_values.route_manager.clear_routes() {
             log::error!("{}", error.display_chain_with_msg("Failed to clear routes"));
         }
         #[cfg(target_os = "linux")]
-        if let Err(error) = shared_values.route_manager.clear_routing_rules() {
+        if let Err(error) = shared_values
+            .runtime
+            .block_on(shared_values.route_manager.clear_routing_rules())
+        {
             log::error!(
                 "{}",
                 error.display_chain_with_msg("Failed to clear routing rules")
@@ -197,41 +203,34 @@ impl ConnectedState {
                 }
                 SameState(self.into())
             }
-            Some(TunnelCommand::CustomDns(servers)) => {
-                match shared_values.set_custom_dns(servers) {
-                    Ok(true) => {
-                        if let Err(error) = self.set_firewall_policy(shared_values) {
-                            return self.disconnect(
-                                shared_values,
-                                AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(
-                                    error,
-                                )),
-                            );
-                        }
-
-                        match self.set_dns(shared_values) {
-                            #[cfg(target_os = "android")]
-                            Ok(()) => self.disconnect(shared_values, AfterDisconnect::Reconnect(0)),
-                            #[cfg(not(target_os = "android"))]
-                            Ok(()) => SameState(self.into()),
-                            Err(error) => {
-                                log::error!(
-                                    "{}",
-                                    error.display_chain_with_msg("Failed to set DNS")
-                                );
-                                self.disconnect(
-                                    shared_values,
-                                    AfterDisconnect::Block(ErrorStateCause::SetDnsError),
-                                )
-                            }
-                        }
+            Some(TunnelCommand::Dns(servers)) => match shared_values.set_dns_servers(servers) {
+                Ok(true) => {
+                    if let Err(error) = self.set_firewall_policy(shared_values) {
+                        return self.disconnect(
+                            shared_values,
+                            AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
+                        );
                     }
-                    Ok(false) => SameState(self.into()),
-                    Err(error_cause) => {
-                        self.disconnect(shared_values, AfterDisconnect::Block(error_cause))
+
+                    match self.set_dns(shared_values) {
+                        #[cfg(target_os = "android")]
+                        Ok(()) => self.disconnect(shared_values, AfterDisconnect::Reconnect(0)),
+                        #[cfg(not(target_os = "android"))]
+                        Ok(()) => SameState(self.into()),
+                        Err(error) => {
+                            log::error!("{}", error.display_chain_with_msg("Failed to set DNS"));
+                            self.disconnect(
+                                shared_values,
+                                AfterDisconnect::Block(ErrorStateCause::SetDnsError),
+                            )
+                        }
                     }
                 }
-            }
+                Ok(false) => SameState(self.into()),
+                Err(error_cause) => {
+                    self.disconnect(shared_values, AfterDisconnect::Block(error_cause))
+                }
+            },
             Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
                 shared_values.block_when_disconnected = block_when_disconnected;
                 SameState(self.into())
@@ -261,18 +260,23 @@ impl ConnectedState {
                 shared_values.bypass_socket(fd, done_tx);
                 SameState(self.into())
             }
+            #[cfg(windows)]
+            Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                let _ = result_tx.send(shared_values.split_tunnel.set_paths(&paths));
+                SameState(self.into())
+            }
         }
     }
 
     fn handle_tunnel_events(
         self,
-        event: Option<TunnelEvent>,
+        event: Option<(TunnelEvent, oneshot::Sender<()>)>,
         shared_values: &mut SharedTunnelStateValues,
     ) -> EventConsequence {
         use self::EventConsequence::*;
 
         match event {
-            Some(TunnelEvent::Down) | None => {
+            Some((TunnelEvent::Down, _)) | None => {
                 self.disconnect(shared_values, AfterDisconnect::Reconnect(0))
             }
             Some(_) => SameState(self.into()),

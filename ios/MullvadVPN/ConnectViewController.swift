@@ -7,33 +7,55 @@
 //
 
 import UIKit
-import NetworkExtension
+import MapKit
 import Logging
 
-class ConnectViewController: UIViewController, RootContainment, TunnelObserver
-{
-    private lazy var mainContentView: ConnectMainContentView = {
+class CustomOverlayRenderer: MKOverlayRenderer {
+    override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
+        let drawRect = self.rect(for: mapRect)
+        context.setFillColor(UIColor.secondaryColor.cgColor)
+        context.fill(drawRect)
+    }
+}
+
+protocol ConnectViewControllerDelegate: AnyObject {
+    func connectViewControllerShouldShowSelectLocationPicker(_ controller: ConnectViewController)
+    func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController)
+    func connectViewControllerShouldDisconnectTunnel(_ controller: ConnectViewController)
+    func connectViewControllerShouldReconnectTunnel(_ controller: ConnectViewController)
+}
+
+class ConnectViewController: UIViewController, MKMapViewDelegate, RootContainment, TunnelObserver, AccountObserver {
+
+    weak var delegate: ConnectViewControllerDelegate?
+
+    let notificationController = NotificationController()
+
+    private let mainContentView: ConnectMainContentView = {
         let view = ConnectMainContentView(frame: UIScreen.main.bounds)
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
 
-    private var relayConstraints: RelayConstraints?
-
     private let logger = Logger(label: "ConnectViewController")
-    private let alertPresenter = AlertPresenter()
+
+    private var lastLocation: CLLocationCoordinate2D?
+    private let locationMarker = MKPointAnnotation()
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
         return .lightContent
     }
 
-    var preferredHeaderBarStyle: HeaderBarStyle {
+    var preferredHeaderBarPresentation: HeaderBarPresentation {
+        if !Account.shared.isLoggedIn {
+            return HeaderBarPresentation(style: .default, showsDivider: true)
+        }
         switch tunnelState {
         case .connecting, .reconnecting, .connected:
-            return .secured
+            return HeaderBarPresentation(style: .secured, showsDivider: false)
 
         case .disconnecting, .disconnected:
-            return .unsecured
+            return HeaderBarPresentation(style: .unsecured, showsDivider: false)
         }
     }
 
@@ -46,39 +68,78 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver
             setNeedsHeaderBarStyleAppearanceUpdate()
             updateTunnelConnectionInfo()
             updateUserInterfaceForTunnelStateChange()
+
+            // Avoid unnecessary animations, particularly when this property is changed from inside
+            // the `viewDidLoad`.
+            let isViewVisible = self.viewIfLoaded?.window != nil
+
+            updateLocation(animated: isViewVisible)
         }
     }
-
-    private var showedAccountView = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        mainContentView.connectionPanel.collapseButton.addTarget(self, action: #selector(handleConnectionPanelButton(_:)), for: .touchUpInside)
         mainContentView.connectButton.addTarget(self, action: #selector(handleConnect(_:)), for: .touchUpInside)
         mainContentView.splitDisconnectButton.primaryButton.addTarget(self, action: #selector(handleDisconnect(_:)), for: .touchUpInside)
         mainContentView.splitDisconnectButton.secondaryButton.addTarget(self, action: #selector(handleReconnect(_:)), for: .touchUpInside)
 
         mainContentView.selectLocationButton.addTarget(self, action: #selector(handleSelectLocation(_:)), for: .touchUpInside)
 
+        TunnelManager.shared.addObserver(self)
+        self.tunnelState = TunnelManager.shared.tunnelState
+
+        addSubviews()
+        setupMapView()
+        updateLocation(animated: false)
+        addNotificationController()
+
+        Account.shared.addObserver(self)
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        if previousTraitCollection?.userInterfaceIdiom != traitCollection.userInterfaceIdiom ||
+            previousTraitCollection?.horizontalSizeClass != traitCollection.horizontalSizeClass {
+            updateTraitDependentViews()
+        }
+    }
+
+    func setMainContentHidden(_ isHidden: Bool, animated: Bool) {
+        let actions = {
+            self.mainContentView.containerView.alpha = isHidden ? 0 : 1
+        }
+
+        if animated {
+            UIView.animate(withDuration: 0.25, animations: actions)
+        } else {
+            actions()
+        }
+    }
+
+    private func addSubviews() {
         view.addSubview(mainContentView)
         NSLayoutConstraint.activate([
             mainContentView.topAnchor.constraint(equalTo: view.topAnchor),
             mainContentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             mainContentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            mainContentView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            mainContentView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
-
-        TunnelManager.shared.addObserver(self)
-        self.tunnelState = TunnelManager.shared.tunnelState
-
-        fetchRelayConstraints()
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
+    // MARK: - AccountObserver
 
-        showAccountViewForExpiredAccount()
+    func account(_ account: Account, didLoginWithToken token: String, expiry: Date) {
+        setNeedsHeaderBarStyleAppearanceUpdate()
+    }
+
+    func account(_ account: Account, didUpdateExpiry expiry: Date) {
+        // no-op
+    }
+
+    func accountDidLogout(_ account: Account) {
+        setNeedsHeaderBarStyleAppearanceUpdate()
     }
 
     // MARK: - TunnelObserver
@@ -89,7 +150,7 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver
         }
     }
 
-    func tunnelPublicKeyDidChange(publicKeyWithMetadata: PublicKeyWithMetadata?) {
+    func tunnelSettingsDidChange(tunnelSettings: TunnelSettings?) {
         // no-op
     }
 
@@ -102,7 +163,18 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver
         mainContentView.connectButton.setTitle(tunnelState.localizedTitleForConnectButton, for: .normal)
         mainContentView.selectLocationButton.setTitle(tunnelState.localizedTitleForSelectLocationButton, for: .normal)
         mainContentView.splitDisconnectButton.primaryButton.setTitle(tunnelState.localizedTitleForDisconnectButton, for: .normal)
-        mainContentView.setActionButtons(tunnelState.actionButtons)
+        mainContentView.splitDisconnectButton.secondaryButton.accessibilityLabel = NSLocalizedString(
+            "RECONNECT_BUTTON_ACCESSIBILITY_LABEL",
+            tableName: "Main",
+            value: "Reconnect",
+            comment: ""
+        )
+
+        updateTraitDependentViews()
+    }
+
+    private func updateTraitDependentViews() {
+        mainContentView.setActionButtons(tunnelState.actionButtons(traitCollection: self.traitCollection))
     }
 
     private func attributedStringForLocation(string: String) -> NSAttributedString {
@@ -125,173 +197,202 @@ class ConnectViewController: UIViewController, RootContainment, TunnelObserver
                 outAddress: nil
             )
             mainContentView.connectionPanel.isHidden = false
-            mainContentView.connectionPanel.collapseButton.setTitle(connectionInfo.hostname, for: .normal)
+            mainContentView.connectionPanel.connectedRelayName = connectionInfo.hostname
 
         case .connecting, .disconnected, .disconnecting:
-            mainContentView.cityLabel.attributedText = attributedStringForLocation(string: " ")
             mainContentView.countryLabel.attributedText = attributedStringForLocation(string: " ")
+            mainContentView.cityLabel.attributedText = attributedStringForLocation(string: " ")
             mainContentView.connectionPanel.dataSource = nil
             mainContentView.connectionPanel.isHidden = true
         }
+
+        mainContentView.locationContainerView.accessibilityLabel = tunnelState.localizedAccessibilityLabel
     }
 
-    private func connectTunnel() {
-        TunnelManager.shared.startTunnel { (result) in
-            DispatchQueue.main.async {
-                switch result {
-                case .success:
-                    break
+    private func locationMarkerOffset() -> CGPoint {
+        // The spacing between the secure label and the marker
+        let markerSecureLabelSpacing = CGFloat(22)
 
-                case .failure(let error):
-                    self.logger.error(chainedError: error, message: "Failed to start the VPN tunnel")
+        // Compute the secure label's frame within the view coordinate system
+        let secureLabelFrame = mainContentView.secureLabel.convert(mainContentView.secureLabel.bounds, to: view)
 
-                    let alertController = UIAlertController(
-                        title: NSLocalizedString("Failed to start the VPN tunnel", comment: ""),
-                        message: error.errorChainDescription,
-                        preferredStyle: .alert
-                    )
-                    alertController.addAction(
-                        UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel)
-                    )
+        // The marker's center coincides with the geo coordinate
+        let markerAnchorOffsetInPoints = locationMarkerSecureImage.size.height * 0.5
 
-                    self.alertPresenter.enqueue(alertController, presentingController: self)
-                }
+        // Compute the distance from the top of the label's frame to the center of the map
+        let secureLabelDistanceToMapCenterY = secureLabelFrame.minY - mainContentView.mapView.frame.midY
+
+        // Compute the marker offset needed to position it above the secure label
+        let offsetY = secureLabelDistanceToMapCenterY - markerAnchorOffsetInPoints - markerSecureLabelSpacing
+
+        return CGPoint(x: 0, y: offsetY)
+    }
+
+    private func computeCoordinateRegion(centerCoordinate: CLLocationCoordinate2D, centerOffsetInPoints: CGPoint) -> MKCoordinateRegion  {
+        let span = MKCoordinateSpan(latitudeDelta: 30, longitudeDelta: 30)
+        var region = MKCoordinateRegion(center: centerCoordinate, span: span)
+        region = mainContentView.mapView.regionThatFits(region)
+
+        let latitudeDeltaPerPoint = region.span.latitudeDelta / Double(mainContentView.mapView.frame.height)
+        var offsetCenter = centerCoordinate
+        offsetCenter.latitude += CLLocationDegrees(latitudeDeltaPerPoint * Double(centerOffsetInPoints.y))
+        region.center = offsetCenter
+
+        return region
+    }
+
+    private func updateLocation(animated: Bool) {
+        switch tunnelState {
+        case .connected(let connectionInfo),
+             .reconnecting(let connectionInfo):
+            let coordinate = connectionInfo.location.geoCoordinate
+            if let lastLocation = self.lastLocation, coordinate.approximatelyEqualTo(lastLocation) {
+                return
             }
+
+            let markerOffset = locationMarkerOffset()
+            let region = computeCoordinateRegion(centerCoordinate: coordinate, centerOffsetInPoints: markerOffset)
+
+            locationMarker.coordinate = coordinate
+            mainContentView.mapView.addAnnotation(locationMarker)
+            mainContentView.mapView.setRegion(region, animated: animated)
+
+            self.lastLocation = coordinate
+
+        case .disconnected, .disconnecting:
+            let coordinate = CLLocationCoordinate2D(latitude: 0, longitude: 0)
+            if let lastLocation = self.lastLocation, coordinate.approximatelyEqualTo(lastLocation) {
+                return
+            }
+
+            let span = MKCoordinateSpan(latitudeDelta: 90, longitudeDelta: 90)
+            let region = MKCoordinateRegion(center: coordinate, span: span)
+            mainContentView.mapView.removeAnnotation(locationMarker)
+            mainContentView.mapView.setRegion(region, animated: animated)
+
+            self.lastLocation = coordinate
+
+        case .connecting:
+            break
         }
     }
 
-    private func disconnectTunnel() {
-        TunnelManager.shared.stopTunnel { (result) in
-            if case .failure(let error) = result {
-                self.logger.error(chainedError: error, message: "Failed to stop the VPN tunnel")
+    private func addNotificationController() {
+        let notificationView = notificationController.view!
+        notificationView.translatesAutoresizingMaskIntoConstraints = false
 
-                let alertController = UIAlertController(
-                    title: NSLocalizedString("Failed to stop the VPN tunnel", comment: ""),
-                    message: error.errorChainDescription,
-                    preferredStyle: .alert
-                )
-                alertController.addAction(
-                    UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel)
-                )
+        addChild(notificationController)
+        view.addSubview(notificationView)
+        notificationController.didMove(toParent: self)
 
-                self.alertPresenter.enqueue(alertController, presentingController: self)
-            }
-        }
-    }
-
-    private func reconnectTunnel() {
-        TunnelManager.shared.reconnectTunnel(completionHandler: nil)
-    }
-
-    private func showAccountViewForExpiredAccount() {
-        guard !showedAccountView else { return }
-
-        showedAccountView = true
-
-        if let accountExpiry = Account.shared.expiry, AccountExpiry(date: accountExpiry).isExpired {
-            rootContainerController?.showSettings(navigateTo: .account, animated: true)
-        }
-    }
-
-    private func showSelectLocationModal() {
-        let contentController = SelectLocationViewController()
-        contentController.navigationItem.title = NSLocalizedString("Select location", comment: "Navigation title")
-        contentController.navigationItem.largeTitleDisplayMode = .never
-        contentController.navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(handleDismissSelectLocationController(_:)))
-
-        contentController.didSelectRelayLocation = { [weak self] (controller, relayLocation) in
-            controller.view.isUserInteractionEnabled = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) {
-                controller.view.isUserInteractionEnabled = true
-                controller.dismiss(animated: true) {
-                    self?.selectLocationControllerDidSelectRelayLocation(relayLocation)
-                }
-            }
-        }
-
-        let navController = SelectLocationNavigationController(contentController: contentController)
-
-        view.isUserInteractionEnabled = false
-        contentController.setSelectedRelayLocation(self.relayConstraints?.location.value, animated: false, scrollPosition: .none)
-        contentController.prefetchData { (error) in
-            if let error = error {
-                self.logger.error(chainedError: error, message: "Failed to prefetch the relays for SelectLocationViewController")
-            }
-
-            self.present(navController, animated: true) {
-                self.view.isUserInteractionEnabled = true
-            }
-        }
-    }
-
-    private func fetchRelayConstraints() {
-        TunnelManager.shared.getRelayConstraints { (result) in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let relayConstraints):
-                    self.relayConstraints = relayConstraints
-
-                case .failure(let error):
-                    self.logger.error(chainedError: error)
-                }
-            }
-        }
-    }
-
-    private func selectLocationControllerDidSelectRelayLocation(_ relayLocation: RelayLocation) {
-        let relayConstraints = makeRelayConstraints(relayLocation)
-
-        self.setTunnelRelayConstraints(relayConstraints)
-        self.relayConstraints = relayConstraints
-    }
-
-    private func makeRelayConstraints(_ location: RelayLocation) -> RelayConstraints {
-        return RelayConstraints(location: .only(location))
-    }
-
-    private func setTunnelRelayConstraints(_ relayConstraints: RelayConstraints) {
-        TunnelManager.shared.setRelayConstraints(relayConstraints) { [weak self] (result) in
-            guard let self = self else { return }
-
-            DispatchQueue.main.async {
-                switch result {
-                case .success:
-                    self.logger.debug("Updated relay constraints: \(relayConstraints)")
-                    self.connectTunnel()
-
-                case .failure(let error):
-                    self.logger.error(chainedError: error, message: "Failed to update relay constraints")
-                }
-            }
-        }
+        NSLayoutConstraint.activate([
+            notificationView.topAnchor.constraint(equalTo: view.topAnchor),
+            notificationView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            notificationView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            notificationView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
     }
 
     // MARK: - Actions
 
-    @objc func handleConnectionPanelButton(_ sender: Any) {
-        mainContentView.connectionPanel.toggleConnectionInfoVisibility()
-    }
-
     @objc func handleConnect(_ sender: Any) {
-        connectTunnel()
+        delegate?.connectViewControllerShouldConnectTunnel(self)
     }
 
     @objc func handleDisconnect(_ sender: Any) {
-        disconnectTunnel()
+        delegate?.connectViewControllerShouldDisconnectTunnel(self)
     }
 
     @objc func handleReconnect(_ sender: Any) {
-        reconnectTunnel()
+        delegate?.connectViewControllerShouldReconnectTunnel(self)
     }
 
     @objc func handleSelectLocation(_ sender: Any) {
-        showSelectLocationModal()
+        delegate?.connectViewControllerShouldShowSelectLocationPicker(self)
     }
 
-    @objc func handleDismissSelectLocationController(_ sender: Any) {
-        self.presentedViewController?.dismiss(animated: true)
+    // MARK: - MKMapViewDelegate
+
+    func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+        if let polygon = overlay as? MKPolygon {
+            let renderer = MKPolygonRenderer(polygon: polygon)
+            renderer.fillColor = UIColor.primaryColor
+            renderer.strokeColor = UIColor.secondaryColor
+            renderer.lineWidth = 1.0
+            renderer.lineCap = .round
+            renderer.lineJoin = .round
+
+            return renderer
+        }
+
+        if #available(iOS 13, *) {
+            if let multiPolygon = overlay as? MKMultiPolygon {
+                let renderer = MKMultiPolygonRenderer(multiPolygon: multiPolygon)
+                renderer.fillColor = UIColor.primaryColor
+                renderer.strokeColor = UIColor.secondaryColor
+                renderer.lineWidth = 1.0
+                renderer.lineCap = .round
+                renderer.lineJoin = .round
+                return renderer
+            }
+        }
+
+        if let tileOverlay = overlay as? MKTileOverlay {
+            return CustomOverlayRenderer(overlay: tileOverlay)
+        }
+
+        fatalError()
     }
 
+    func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+        if annotation === locationMarker {
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: "location", for: annotation)
+            view.isDraggable = false
+            view.canShowCallout = false
+            view.image = self.locationMarkerSecureImage
+            return view
+        }
+        return nil
+    }
+
+    // MARK: - Private
+
+    private var locationMarkerSecureImage: UIImage {
+        return UIImage(named: "LocationMarkerSecure")!
+    }
+
+    private func setupMapView() {
+        mainContentView.mapView.insetsLayoutMarginsFromSafeArea = false
+        mainContentView.mapView.delegate = self
+        mainContentView.mapView.register(MKAnnotationView.self, forAnnotationViewWithReuseIdentifier: "location")
+
+        if #available(iOS 13.0, *) {
+            // Use dark style for the map to dim the map grid
+            mainContentView.mapView.overrideUserInterfaceStyle = .dark
+        }
+
+        addTileOverlay()
+        loadGeoJSONData()
+    }
+
+    private func addTileOverlay() {
+        // Use `nil` for template URL to make sure that Apple maps do not load
+        // tiles from remote.
+        let tileOverlay = MKTileOverlay(urlTemplate: nil)
+
+        // Replace the default map tiles
+        tileOverlay.canReplaceMapContent = true
+
+        mainContentView.mapView.addOverlay(tileOverlay)
+    }
+
+    private func loadGeoJSONData() {
+        let fileURL = Bundle.main.url(forResource: "countries.geo", withExtension: "json")!
+        let data = try! Data(contentsOf: fileURL)
+
+        let overlays = try! GeoJSON.decodeGeoJSON(data)
+        mainContentView.mapView.addOverlays(overlays, level: .aboveLabels)
+    }
 }
 
 private extension TunnelState {
@@ -312,43 +413,133 @@ private extension TunnelState {
     var localizedTitleForSecureLabel: String {
         switch self {
         case .connecting, .reconnecting:
-            return NSLocalizedString("Creating secure connection", comment: "")
+            return NSLocalizedString(
+                "TUNNEL_STATE_CONNECTING",
+                tableName: "Main",
+                value: "Creating secure connection",
+                comment: ""
+            )
 
         case .connected:
-            return NSLocalizedString("Secure connection", comment: "")
+            return NSLocalizedString(
+                "TUNNEL_STATE_CONNECTED",
+                tableName: "Main",
+                value: "Secure connection",
+                comment: ""
+            )
 
         case .disconnecting, .disconnected:
-            return NSLocalizedString("Unsecured connection", comment: "")
+            return NSLocalizedString(
+                "TUNNEL_STATE_DISCONNECTED",
+                tableName: "Main",
+                value: "Unsecure connection",
+                comment: ""
+            )
         }
     }
 
     var localizedTitleForSelectLocationButton: String? {
         switch self {
         case .disconnected, .disconnecting:
-            return NSLocalizedString("Select location", comment: "")
+            return NSLocalizedString(
+                "SELECT_LOCATION_BUTTON_TITLE",
+                tableName: "Main",
+                value: "Select location",
+                comment: ""
+            )
         case .connecting, .connected, .reconnecting:
-            return NSLocalizedString("Switch location", comment: "")
+            return NSLocalizedString(
+                "SWITCH_LOCATION_BUTTON_TITLE",
+                tableName: "Main",
+                value: "Switch location",
+                comment: ""
+            )
         }
     }
 
-    var localizedTitleForConnectButton: String? {
-        return NSLocalizedString("Secure connection", comment: "")
+    var localizedTitleForConnectButton: String {
+        return NSLocalizedString(
+            "CONNECT_BUTTON_TITLE",
+            tableName: "Main",
+            value: "Secure connection",
+            comment: ""
+        )
     }
 
-    var localizedTitleForDisconnectButton: String? {
+    var localizedTitleForDisconnectButton: String {
         switch self {
         case .connecting:
-            return NSLocalizedString("Cancel", comment: "")
-        case .connected, .reconnecting:
-            return NSLocalizedString("Disconnect", comment: "")
-        case .disconnecting, .disconnected:
-            return nil
+            return NSLocalizedString(
+                "CANCEL_BUTTON_TITLE",
+                tableName: "Main",
+                value: "Cancel",
+                comment: ""
+            )
+        case .connected, .reconnecting, .disconnecting, .disconnected:
+            return NSLocalizedString(
+                "DISCONNECT_BUTTON_TITLE",
+                tableName: "Main",
+                value: "Disconnect",
+                comment: ""
+            )
         }
     }
 
-    var actionButtons: [ConnectMainContentView.ActionButton] {
-        switch UIDevice.current.userInterfaceIdiom {
-        case .phone:
+    var localizedAccessibilityLabel: String {
+        switch self {
+        case .connecting:
+            return NSLocalizedString(
+                "TUNNEL_STATE_CONNECTING_ACCESSIBILITY_LABEL",
+                tableName: "Main",
+                value: "Creating secure connection",
+                comment: ""
+            )
+
+        case .connected(let tunnelInfo):
+            return String(
+                format: NSLocalizedString(
+                    "TUNNEL_STATE_CONNECTED_ACCESSIBILITY_LABEL",
+                    tableName: "Main",
+                    value: "Secure connection. Connected to %@, %@",
+                    comment: ""
+                ),
+                tunnelInfo.location.city,
+                tunnelInfo.location.country
+            )
+
+        case .disconnected:
+            return NSLocalizedString(
+                "TUNNEL_STATE_DISCONNECTED_ACCESSIBILITY_LABEL",
+                tableName: "Main",
+                value: "Unsecured connection",
+                comment: ""
+            )
+
+        case .reconnecting(let tunnelInfo):
+            return String(
+                format: NSLocalizedString(
+                    "TUNNEL_STATE_RECONNECTING_ACCESSIBILITY_LABEL",
+                    tableName: "Main",
+                    value: "Reconnecting to %@, %@",
+                    comment: ""
+                ),
+                tunnelInfo.location.city,
+                tunnelInfo.location.country
+            )
+
+        case .disconnecting:
+            return NSLocalizedString(
+                "TUNNEL_STATE_DISCONNECTING_ACCESSIBILITY_LABEL",
+                tableName: "Main",
+                value: "Disconnecting",
+                comment: ""
+            )
+        }
+    }
+
+    func actionButtons(traitCollection: UITraitCollection) -> [ConnectMainContentView.ActionButton] {
+        switch (traitCollection.userInterfaceIdiom, traitCollection.horizontalSizeClass) {
+        case (.phone, _), (.pad, .compact):
             switch self {
             case .disconnected, .disconnecting:
                 return [.selectLocation, .connect]
@@ -357,7 +548,7 @@ private extension TunnelState {
                 return [.selectLocation, .disconnect]
             }
 
-        case .pad:
+        case (.pad, .regular):
             switch self {
             case .disconnected, .disconnecting:
                 return [.connect]
@@ -367,8 +558,15 @@ private extension TunnelState {
             }
 
         default:
-            fatalError("Not supported")
+            return []
         }
     }
 
+}
+
+private extension CLLocationCoordinate2D {
+    func approximatelyEqualTo(_ other: CLLocationCoordinate2D) -> Bool {
+        return fabs(self.latitude - other.latitude) <= .ulpOfOne &&
+            fabs(self.longitude - other.longitude) <= .ulpOfOne
+    }
 }

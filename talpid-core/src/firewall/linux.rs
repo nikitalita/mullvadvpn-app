@@ -577,17 +577,20 @@ impl<'a> PolicyBatch<'a> {
         let allow_lan = match policy {
             FirewallPolicy::Connecting {
                 peer_endpoint,
-                pingable_hosts,
+                tunnel,
                 allow_lan,
                 allowed_endpoint,
             } => {
-                self.add_allow_icmp_pingable_hosts(&pingable_hosts);
                 self.add_allow_tunnel_endpoint_rules(peer_endpoint);
                 self.add_allow_endpoint_rules(allowed_endpoint);
 
                 // Important to block DNS after allow relay rule (so the relay can operate
                 // over port 53) but before allow LAN (so DNS does not leak to the LAN)
                 self.add_drop_dns_rule();
+
+                if let Some(tunnel) = tunnel {
+                    self.add_allow_tunnel_rules(&tunnel.interface)?;
+                }
                 *allow_lan
             }
             FirewallPolicy::Connected {
@@ -602,7 +605,7 @@ impl<'a> PolicyBatch<'a> {
                 // Important to block DNS *before* we allow the tunnel and allow LAN. So DNS
                 // can't leak to the wrong IPs in the tunnel or on the LAN.
                 self.add_drop_dns_rule();
-                self.add_allow_tunnel_rules(tunnel)?;
+                self.add_allow_tunnel_rules(&tunnel.interface)?;
                 if *allow_lan {
                     self.add_block_cve_2019_14899(tunnel);
                 }
@@ -681,29 +684,6 @@ impl<'a> PolicyBatch<'a> {
         add_verdict(&mut out_rule, &Verdict::Accept);
 
         self.batch.add(&out_rule, nftnl::MsgType::Add);
-    }
-
-    fn add_allow_icmp_pingable_hosts(&mut self, pingable_hosts: &[IpAddr]) {
-        for host in pingable_hosts {
-            let icmp_proto = match &host {
-                IpAddr::V4(_) => libc::IPPROTO_ICMP as u8,
-                IpAddr::V6(_) => libc::IPPROTO_ICMPV6 as u8,
-            };
-
-            let mut out_rule = Rule::new(&self.out_chain);
-            check_ip(&mut out_rule, End::Dst, *host);
-            out_rule.add_expr(&nft_expr!(meta l4proto));
-            out_rule.add_expr(&nft_expr!(cmp == icmp_proto));
-            add_verdict(&mut out_rule, &Verdict::Accept);
-            self.batch.add(&out_rule, nftnl::MsgType::Add);
-
-            let mut in_rule = Rule::new(&self.in_chain);
-            check_ip(&mut in_rule, End::Src, *host);
-            in_rule.add_expr(&nft_expr!(meta l4proto));
-            in_rule.add_expr(&nft_expr!(cmp == icmp_proto));
-            add_verdict(&mut in_rule, &Verdict::Accept);
-            self.batch.add(&in_rule, nftnl::MsgType::Add);
-        }
     }
 
     fn add_allow_dns_rules(
@@ -819,22 +799,22 @@ impl<'a> PolicyBatch<'a> {
         }
     }
 
-    fn add_allow_tunnel_rules(&mut self, tunnel: &tunnel::TunnelMetadata) -> Result<()> {
+    fn add_allow_tunnel_rules(&mut self, tunnel_interface: &str) -> Result<()> {
         self.batch.add(
-            &allow_interface_rule(&self.out_chain, Direction::Out, &tunnel.interface[..])?,
+            &allow_interface_rule(&self.out_chain, Direction::Out, tunnel_interface)?,
             nftnl::MsgType::Add,
         );
         self.batch.add(
-            &allow_interface_rule(&self.forward_chain, Direction::Out, &tunnel.interface[..])?,
+            &allow_interface_rule(&self.forward_chain, Direction::Out, tunnel_interface)?,
             nftnl::MsgType::Add,
         );
         self.batch.add(
-            &allow_interface_rule(&self.in_chain, Direction::In, &tunnel.interface[..])?,
+            &allow_interface_rule(&self.in_chain, Direction::In, tunnel_interface)?,
             nftnl::MsgType::Add,
         );
 
         let mut interface_rule = Rule::new(&self.forward_chain);
-        check_iface(&mut interface_rule, Direction::In, &tunnel.interface)?;
+        check_iface(&mut interface_rule, Direction::In, tunnel_interface)?;
         interface_rule.add_expr(&nft_expr!(ct state));
         let allowed_states = nftnl::expr::ct::States::ESTABLISHED.bits();
         interface_rule.add_expr(&nft_expr!(bitwise mask allowed_states, xor 0u32));

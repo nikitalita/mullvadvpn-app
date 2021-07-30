@@ -22,11 +22,11 @@ pub use self::connect::Connect;
 mod disconnect;
 pub use self::disconnect::Disconnect;
 
+mod dns;
+pub use self::dns::Dns;
+
 mod lan;
 pub use self::lan::Lan;
-
-mod custom_dns;
-pub use self::custom_dns::CustomDns;
 
 mod reconnect;
 pub use self::reconnect::Reconnect;
@@ -37,9 +37,9 @@ pub use self::relay::Relay;
 mod reset;
 pub use self::reset::Reset;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod split_tunnel;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub use self::split_tunnel::SplitTunnel;
 
 mod status;
@@ -61,13 +61,12 @@ pub fn get_commands() -> HashMap<&'static str, Box<dyn Command>> {
         Box::new(Bridge),
         Box::new(Connect),
         Box::new(Disconnect),
+        Box::new(Dns),
         Box::new(Reconnect),
         Box::new(Lan),
-        #[cfg(not(target_os = "android"))]
-        Box::new(CustomDns),
         Box::new(Relay),
         Box::new(Reset),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         Box::new(SplitTunnel),
         Box::new(Status),
         Box::new(Tunnel),

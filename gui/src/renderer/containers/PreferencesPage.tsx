@@ -1,9 +1,9 @@
 import { connect } from 'react-redux';
-import { RouteComponentProps, withRouter } from 'react-router';
+import { IDnsOptions } from '../../shared/daemon-rpc-types';
 import log from '../../shared/logging';
-import consumePromise from '../../shared/promise';
 import Preferences from '../components/Preferences';
 import withAppContext, { IAppContext } from '../context';
+import { IHistoryProps, withHistory } from '../lib/history';
 import { IReduxState, ReduxDispatch } from '../redux/store';
 
 const mapStateToProps = (state: IReduxState) => ({
@@ -16,12 +16,13 @@ const mapStateToProps = (state: IReduxState) => ({
   monochromaticIcon: state.settings.guiSettings.monochromaticIcon,
   startMinimized: state.settings.guiSettings.startMinimized,
   unpinnedWindow: state.settings.guiSettings.unpinnedWindow,
+  dns: state.settings.dns,
 });
 
-const mapDispatchToProps = (_dispatch: ReduxDispatch, props: RouteComponentProps & IAppContext) => {
+const mapDispatchToProps = (_dispatch: ReduxDispatch, props: IHistoryProps & IAppContext) => {
   return {
     onClose: () => {
-      props.history.goBack();
+      props.history.pop();
     },
     setEnableSystemNotifications: (flag: boolean) => {
       props.app.setEnableSystemNotifications(flag);
@@ -37,10 +38,10 @@ const mapDispatchToProps = (_dispatch: ReduxDispatch, props: RouteComponentProps
       props.app.setAutoConnect(autoConnect);
     },
     setAllowLan: (allowLan: boolean) => {
-      consumePromise(props.app.setAllowLan(allowLan));
+      void props.app.setAllowLan(allowLan);
     },
     setShowBetaReleases: (showBetaReleases: boolean) => {
-      consumePromise(props.app.setShowBetaReleases(showBetaReleases));
+      void props.app.setShowBetaReleases(showBetaReleases);
     },
     setStartMinimized: (startMinimized: boolean) => {
       props.app.setStartMinimized(startMinimized);
@@ -51,9 +52,12 @@ const mapDispatchToProps = (_dispatch: ReduxDispatch, props: RouteComponentProps
     setUnpinnedWindow: (unpinnedWindow: boolean) => {
       props.app.setUnpinnedWindow(unpinnedWindow);
     },
+    setDnsOptions: (dns: IDnsOptions) => {
+      return props.app.setDnsOptions(dns);
+    },
   };
 };
 
 export default withAppContext(
-  withRouter(connect(mapStateToProps, mapDispatchToProps)(Preferences)),
+  withHistory(connect(mapStateToProps, mapDispatchToProps)(Preferences)),
 );

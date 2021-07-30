@@ -9,12 +9,20 @@
 import UIKit
 
 private let kCollapseButtonWidth: CGFloat = 24
+private let kRelayIndicatorSize: CGFloat = 16
 
 class SelectLocationCell: BasicTableViewCell {
     typealias CollapseHandler = (SelectLocationCell) -> Void
 
     let locationLabel = UILabel()
-    let statusIndicator = RelayStatusIndicatorView()
+    let statusIndicator: UIView = {
+        let view = UIView()
+        view.layer.cornerRadius = kRelayIndicatorSize * 0.5
+        if #available(iOS 13.0, *) {
+            view.layer.cornerCurve = .circular
+        }
+        return view
+    }()
     let tickImageView = UIImageView(image: UIImage(named: "IconTick"))
     let collapseButton = UIButton(type: .custom)
 
@@ -25,18 +33,21 @@ class SelectLocationCell: BasicTableViewCell {
         didSet {
             updateDisabled()
             updateBackgroundColor()
+            updateStatusIndicatorColor()
         }
     }
 
     var isExpanded = false {
         didSet {
             updateCollapseImage()
+            updateAccessibilityCustomActions()
         }
     }
 
     var showsCollapseControl = false {
         didSet {
             collapseButton.isHidden = !showsCollapseControl
+            updateAccessibilityCustomActions()
         }
     }
 
@@ -73,10 +84,17 @@ class SelectLocationCell: BasicTableViewCell {
         )
     }
 
+    override func setHighlighted(_ highlighted: Bool, animated: Bool) {
+        super.setHighlighted(highlighted, animated: animated)
+
+        updateStatusIndicatorColor()
+    }
+
     override func setSelected(_ selected: Bool, animated: Bool) {
         super.setSelected(selected, animated: animated)
 
         updateTickImage()
+        updateStatusIndicatorColor()
     }
 
     private func setupCell() {
@@ -88,12 +106,11 @@ class SelectLocationCell: BasicTableViewCell {
         locationLabel.font = UIFont.systemFont(ofSize: 17)
         locationLabel.textColor = .white
 
-        statusIndicator.tintColor = .white
         tickImageView.tintColor = .white
 
         collapseButton.accessibilityIdentifier = "CollapseButton"
+        collapseButton.isAccessibilityElement = false
         collapseButton.tintColor = .white
-        collapseButton.setImage(chevronDown, for: .normal)
         collapseButton.addTarget(self, action: #selector(handleCollapseButton(_ :)), for: .touchUpInside)
 
         [locationLabel, tickImageView, statusIndicator, collapseButton].forEach { (subview) in
@@ -102,6 +119,7 @@ class SelectLocationCell: BasicTableViewCell {
         }
 
         updateCollapseImage()
+        updateAccessibilityCustomActions()
         updateDisabled()
         updateBackgroundColor()
 
@@ -109,8 +127,8 @@ class SelectLocationCell: BasicTableViewCell {
             tickImageView.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
             tickImageView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
 
-            statusIndicator.widthAnchor.constraint(equalToConstant: 16),
-            statusIndicator.heightAnchor.constraint(equalToConstant: 16),
+            statusIndicator.widthAnchor.constraint(equalToConstant: kRelayIndicatorSize),
+            statusIndicator.heightAnchor.constraint(equalTo: statusIndicator.widthAnchor),
             statusIndicator.centerXAnchor.constraint(equalTo: tickImageView.centerXAnchor),
             statusIndicator.centerYAnchor.constraint(equalTo: tickImageView.centerYAnchor),
 
@@ -131,9 +149,19 @@ class SelectLocationCell: BasicTableViewCell {
         tickImageView.isHidden = !isSelected
     }
 
+    private func updateStatusIndicatorColor() {
+        statusIndicator.backgroundColor = statusIndicatorColor()
+    }
+
     private func updateDisabled() {
         locationLabel.alpha = isDisabled ? 0.2 : 1
         collapseButton.alpha = isDisabled ? 0.2 : 1
+
+        if isDisabled {
+            accessibilityTraits.insert(.notEnabled)
+        } else {
+            accessibilityTraits.remove(.notEnabled)
+        }
     }
 
     private func updateBackgroundColor() {
@@ -160,13 +188,42 @@ class SelectLocationCell: BasicTableViewCell {
         }
     }
 
+    private func statusIndicatorColor() -> UIColor {
+        if isDisabled {
+            return UIColor.RelayStatusIndicator.inactiveColor
+        } else if isHighlighted {
+            return UIColor.RelayStatusIndicator.highlightColor
+        } else {
+            return UIColor.RelayStatusIndicator.activeColor
+        }
+    }
+
     @objc private func handleCollapseButton(_ sender: UIControl) {
         didCollapseHandler?(self)
+    }
+
+    @objc private func toggleCollapseAccessibilityAction() -> Bool {
+        didCollapseHandler?(self)
+        return true
     }
 
     private func updateCollapseImage() {
         let image = isExpanded ? chevronUp : chevronDown
 
         collapseButton.setImage(image, for: .normal)
+    }
+
+    private func updateAccessibilityCustomActions() {
+        if showsCollapseControl {
+            let actionName = isExpanded
+                ? NSLocalizedString("SELECT_LOCATION_COLLAPSE_ACCESSIBILITY_ACTION", tableName: "SelectLocation", comment: "")
+                : NSLocalizedString("SELECT_LOCATION_EXPAND_ACCESSIBILITY_ACTION", tableName: "SelectLocation", comment: "")
+
+            accessibilityCustomActions = [
+                UIAccessibilityCustomAction(name: actionName, target: self, selector: #selector(toggleCollapseAccessibilityAction))
+            ]
+        } else {
+            accessibilityCustomActions = nil
+        }
     }
 }

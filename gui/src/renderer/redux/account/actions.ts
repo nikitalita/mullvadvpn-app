@@ -44,12 +44,13 @@ interface IUpdateAccountTokenAction {
 
 interface IUpdateAccountHistoryAction {
   type: 'UPDATE_ACCOUNT_HISTORY';
-  accountHistory: AccountToken[];
+  accountHistory?: AccountToken;
 }
 
 interface IUpdateAccountExpiryAction {
   type: 'UPDATE_ACCOUNT_EXPIRY';
   expiry?: string;
+  previousExpiry?: string;
 }
 
 export type AccountAction =
@@ -125,17 +126,18 @@ function updateAccountToken(token: AccountToken): IUpdateAccountTokenAction {
   };
 }
 
-function updateAccountHistory(accountHistory: AccountToken[]): IUpdateAccountHistoryAction {
+function updateAccountHistory(accountHistory?: AccountToken): IUpdateAccountHistoryAction {
   return {
     type: 'UPDATE_ACCOUNT_HISTORY',
     accountHistory,
   };
 }
 
-function updateAccountExpiry(expiry?: string): IUpdateAccountExpiryAction {
+function updateAccountExpiry(expiry?: string, previousExpiry?: string): IUpdateAccountExpiryAction {
   return {
     type: 'UPDATE_ACCOUNT_EXPIRY',
     expiry,
+    previousExpiry,
   };
 }
 

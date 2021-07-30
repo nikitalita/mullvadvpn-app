@@ -18,7 +18,6 @@ use futures::{
 };
 use log::{debug, error, info, trace, warn};
 use std::{
-    net::IpAddr,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -47,6 +46,7 @@ const MIN_TUNNEL_ALIVE_TIME: Duration = Duration::from_millis(1000);
 pub struct ConnectingState {
     tunnel_events: TunnelEventsReceiver,
     tunnel_parameters: TunnelParameters,
+    tunnel_metadata: Option<TunnelMetadata>,
     tunnel_close_event: TunnelCloseEvent,
     close_handle: Option<CloseHandle>,
     retry_attempt: u32,
@@ -56,6 +56,7 @@ impl ConnectingState {
     fn set_firewall_policy(
         shared_values: &mut SharedTunnelStateValues,
         params: &TunnelParameters,
+        tunnel_metadata: &Option<TunnelMetadata>,
     ) -> Result<(), FirewallPolicyError> {
         #[cfg(target_os = "linux")]
         shared_values.disable_connectivity_check();
@@ -64,7 +65,7 @@ impl ConnectingState {
 
         let policy = FirewallPolicy::Connecting {
             peer_endpoint,
-            pingable_hosts: gateway_list_from_params(params),
+            tunnel: tunnel_metadata.clone(),
             allow_lan: shared_values.allow_lan,
             allowed_endpoint: shared_values.allowed_endpoint.clone(),
             #[cfg(windows)]
@@ -98,9 +99,14 @@ impl ConnectingState {
         retry_attempt: u32,
     ) -> crate::tunnel::Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded();
-        let on_tunnel_event = move |event| {
-            let _ = event_tx.unbounded_send(event);
-        };
+        let on_tunnel_event =
+            move |event| -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                let (tx, rx) = oneshot::channel();
+                let _ = event_tx.unbounded_send((event, tx));
+                Box::pin(async move {
+                    let _ = rx.await;
+                })
+            };
 
         let monitor = TunnelMonitor::start(
             runtime,
@@ -117,6 +123,7 @@ impl ConnectingState {
         Ok(ConnectingState {
             tunnel_events: event_rx.fuse(),
             tunnel_parameters: parameters,
+            tunnel_metadata: None,
             tunnel_close_event,
             close_handle,
             retry_attempt,
@@ -163,6 +170,15 @@ impl ConnectingState {
                     log::debug!("WireGuard tunnel timed out");
                     None
                 }
+                error @ tunnel::Error::WireguardTunnelMonitoringError(..)
+                    if !should_retry(&error) =>
+                {
+                    error!(
+                        "{}",
+                        error.display_chain_with_msg("Tunnel has stopped unexpectedly")
+                    );
+                    Some(ErrorStateCause::StartTunnelError)
+                }
                 error => {
                     warn!(
                         "{}",
@@ -185,13 +201,14 @@ impl ConnectingState {
     }
 
     fn reset_routes(shared_values: &mut SharedTunnelStateValues) {
-        #[cfg(windows)]
-        shared_values.route_manager.clear_default_route_callbacks();
         if let Err(error) = shared_values.route_manager.clear_routes() {
             log::error!("{}", error.display_chain_with_msg("Failed to clear routes"));
         }
         #[cfg(target_os = "linux")]
-        if let Err(error) = shared_values.route_manager.clear_routing_rules() {
+        if let Err(error) = shared_values
+            .runtime
+            .block_on(shared_values.route_manager.clear_routing_rules())
+        {
             log::error!(
                 "{}",
                 error.display_chain_with_msg("Failed to clear routing rules")
@@ -224,7 +241,11 @@ impl ConnectingState {
                 if let Err(error_cause) = shared_values.set_allow_lan(allow_lan) {
                     self.disconnect(shared_values, AfterDisconnect::Block(error_cause))
                 } else {
-                    match Self::set_firewall_policy(shared_values, &self.tunnel_parameters) {
+                    match Self::set_firewall_policy(
+                        shared_values,
+                        &self.tunnel_parameters,
+                        &self.tunnel_metadata,
+                    ) {
                         Ok(()) => {
                             cfg_if! {
                                 if #[cfg(target_os = "android")] {
@@ -243,9 +264,11 @@ impl ConnectingState {
             }
             Some(TunnelCommand::AllowEndpoint(endpoint, tx)) => {
                 if shared_values.set_allowed_endpoint(endpoint) {
-                    if let Err(error) =
-                        Self::set_firewall_policy(shared_values, &self.tunnel_parameters)
-                    {
+                    if let Err(error) = Self::set_firewall_policy(
+                        shared_values,
+                        &self.tunnel_parameters,
+                        &self.tunnel_metadata,
+                    ) {
                         return self.disconnect(
                             shared_values,
                             AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
@@ -257,14 +280,12 @@ impl ConnectingState {
                 }
                 SameState(self.into())
             }
-            Some(TunnelCommand::CustomDns(servers)) => {
-                match shared_values.set_custom_dns(servers) {
-                    #[cfg(target_os = "android")]
-                    Ok(true) => self.disconnect(shared_values, AfterDisconnect::Reconnect(0)),
-                    Ok(_) => SameState(self.into()),
-                    Err(cause) => self.disconnect(shared_values, AfterDisconnect::Block(cause)),
-                }
-            }
+            Some(TunnelCommand::Dns(servers)) => match shared_values.set_dns_servers(servers) {
+                #[cfg(target_os = "android")]
+                Ok(true) => self.disconnect(shared_values, AfterDisconnect::Reconnect(0)),
+                Ok(_) => SameState(self.into()),
+                Err(cause) => self.disconnect(shared_values, AfterDisconnect::Block(cause)),
+            },
             Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
                 shared_values.block_when_disconnected = block_when_disconnected;
                 SameState(self.into())
@@ -294,26 +315,61 @@ impl ConnectingState {
                 shared_values.bypass_socket(fd, done_tx);
                 SameState(self.into())
             }
+            #[cfg(windows)]
+            Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                let _ = result_tx.send(shared_values.split_tunnel.set_paths(&paths));
+                SameState(self.into())
+            }
         }
     }
 
     fn handle_tunnel_events(
-        self,
-        event: Option<tunnel::TunnelEvent>,
+        mut self,
+        event: Option<(tunnel::TunnelEvent, oneshot::Sender<()>)>,
         shared_values: &mut SharedTunnelStateValues,
     ) -> EventConsequence {
         use self::EventConsequence::*;
 
         match event {
-            Some(TunnelEvent::AuthFailed(reason)) => self.disconnect(
+            Some((TunnelEvent::AuthFailed(reason), _)) => self.disconnect(
                 shared_values,
                 AfterDisconnect::Block(ErrorStateCause::AuthFailed(reason)),
             ),
-            Some(TunnelEvent::Up(metadata)) => NewState(ConnectedState::enter(
+            Some((TunnelEvent::InterfaceUp(metadata), _done_tx)) => {
+                #[cfg(windows)]
+                if let Err(error) = shared_values
+                    .split_tunnel
+                    .set_tunnel_addresses(Some(&metadata))
+                {
+                    log::error!(
+                        "{}",
+                        error.display_chain_with_msg(
+                            "Failed to register addresses with split tunnel driver"
+                        )
+                    );
+                    return self.disconnect(
+                        shared_values,
+                        AfterDisconnect::Block(ErrorStateCause::SplitTunnelError),
+                    );
+                }
+                self.tunnel_metadata = Some(metadata);
+                match Self::set_firewall_policy(
+                    shared_values,
+                    &self.tunnel_parameters,
+                    &self.tunnel_metadata,
+                ) {
+                    Ok(()) => SameState(self.into()),
+                    Err(error) => self.disconnect(
+                        shared_values,
+                        AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
+                    ),
+                }
+            }
+            Some((TunnelEvent::Up(metadata), _)) => NewState(ConnectedState::enter(
                 shared_values,
                 self.into_connected_state_bootstrap(metadata),
             )),
-            Some(TunnelEvent::Down) => SameState(self.into()),
+            Some((TunnelEvent::Down, _)) => SameState(self.into()),
             None => {
                 // The channel was closed
                 debug!("The tunnel disconnected unexpectedly");
@@ -403,7 +459,21 @@ impl TunnelState for ConnectingState {
                 ErrorState::enter(shared_values, ErrorStateCause::TunnelParameterError(err))
             }
             Ok(tunnel_parameters) => {
-                if let Err(error) = Self::set_firewall_policy(shared_values, &tunnel_parameters) {
+                #[cfg(windows)]
+                if let Err(error) = shared_values.split_tunnel.set_tunnel_addresses(None) {
+                    log::error!(
+                        "{}",
+                        error.display_chain_with_msg(
+                            "Failed to reset addresses in split tunnel driver"
+                        )
+                    );
+
+                    return ErrorState::enter(shared_values, ErrorStateCause::SplitTunnelError);
+                }
+
+                if let Err(error) =
+                    Self::set_firewall_policy(shared_values, &tunnel_parameters, &None)
+                {
                     ErrorState::enter(
                         shared_values,
                         ErrorStateCause::SetFirewallPolicyError(error),
@@ -514,19 +584,5 @@ impl TunnelState for ConnectingState {
                 self.handle_tunnel_close_event(block_reason, shared_values)
             }
         }
-    }
-}
-
-fn gateway_list_from_params(params: &TunnelParameters) -> Vec<IpAddr> {
-    match params {
-        TunnelParameters::Wireguard(params) => {
-            let mut gateways = vec![params.connection.ipv4_gateway.into()];
-            if let Some(ipv6_gateway) = params.connection.ipv6_gateway {
-                gateways.push(ipv6_gateway.into())
-            };
-            gateways
-        }
-        // No gateway list required when connecting to openvpn
-        TunnelParameters::OpenVpn(_) => vec![],
     }
 }

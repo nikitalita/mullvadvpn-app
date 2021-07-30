@@ -43,6 +43,11 @@ open class MainActivity : FragmentActivity() {
 
         if (newConnection == null) {
             serviceNotifier.notify(null)
+        } else {
+            newConnection.vpnPermission.onRequest = { ->
+                Unit
+                this.requestVpnPermission()
+            }
         }
     }
 
@@ -55,7 +60,6 @@ open class MainActivity : FragmentActivity() {
         override fun onServiceDisconnected(className: ComponentName) {
             android.util.Log.d("mullvad", "UI lost the connection to the service")
             serviceConnection = null
-            serviceNotifier.notify(null)
         }
     }
 
@@ -115,6 +119,8 @@ open class MainActivity : FragmentActivity() {
         unbindService(serviceConnectionManager)
 
         super.onStop()
+
+        serviceConnection = null
     }
 
     override fun onDestroy() {

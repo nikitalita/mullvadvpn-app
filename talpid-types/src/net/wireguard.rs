@@ -25,6 +25,7 @@ pub struct TunnelParameters {
 pub struct ConnectionConfig {
     pub tunnel: TunnelConfig,
     pub peer: PeerConfig,
+    pub exit_peer: Option<PeerConfig>,
     /// Gateway used by the tunnel (a private address).
     pub ipv4_gateway: Ipv4Addr,
     pub ipv6_gateway: Option<Ipv6Addr>,
@@ -37,11 +38,18 @@ impl ConnectionConfig {
             protocol: self.peer.protocol,
         }
     }
+
+    pub fn get_exit_endpoint(&self) -> Option<Endpoint> {
+        self.exit_peer.as_ref().map(|peer| Endpoint {
+            address: peer.endpoint,
+            protocol: peer.protocol,
+        })
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Deserialize, Serialize, Debug, Hash)]
 pub struct PeerConfig {
-    /// Public key corresponding to the private key in [`TunnelConfig`].
+    /// Peer's public key.
     pub public_key: PublicKey,
     /// Addresses that may be routed to the peer. Use `0.0.0.0/0` to route everything.
     pub allowed_ips: Vec<IpNetwork>,
@@ -152,6 +160,10 @@ impl<'de> Deserialize<'de> for PrivateKey {
 #[derive(Clone)]
 pub struct PublicKey(x25519_dalek::PublicKey);
 
+/// Error returned if a base64 string represents an invalid key
+#[derive(Debug)]
+pub struct InvalidKeyError(());
+
 impl PublicKey {
     /// Get the public key as bytes
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -160,6 +172,16 @@ impl PublicKey {
 
     pub fn to_base64(&self) -> String {
         base64::encode(self.as_bytes())
+    }
+
+    pub fn from_base64(key: &str) -> Result<Self, InvalidKeyError> {
+        let bytes = base64::decode(key).map_err(|_| InvalidKeyError(()))?;
+        if bytes.len() != 32 {
+            return Err(InvalidKeyError(()));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Ok(From::from(key))
     }
 }
 

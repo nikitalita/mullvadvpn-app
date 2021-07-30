@@ -23,28 +23,98 @@ Line wrap the file at 100 chars.                                              Th
 
 
 ## [Unreleased]
+
+### Changed
+- Only use the account history file to store the last used account.
+- Update the out of time-view and new account-view to make it more user friendly.
+- Change the app update notification when the suggested version is a beta, to include that it's a
+  beta.
+- Upgrade OpenVPN from 2.5.1 to 2.5.3.
+- Update Electron from 11.2.3 to 11.4.9.
+
+### Fixed
+- Fix link to download page not always using the beta URL when it should.
+- Fix deadlock that may occur when the API cannot be reached while entering the connecting state.
+- Fix bug causing desktop app to log in if account number field was filled when removing account
+  history.
+- Fix lack of account expiry updates when using the app in unpinned mode and improve updating of
+  account expiry overall.
+- Fix incorrect WireGuard relay filtering when exit and entry locations overlap.
+- Fix wrong translations when switching to/from unpinned window after changing language in the
+  desktop app.
+
+#### Linux
+- Make offline monitor aware of routing table changes.
+- Assign local DNS servers to more appropriate interfaces when using systemd-resolved.
+
+#### Windows
+- Fix failure to restart the daemon when resuming from "fast startup" hibernation.
+- Fix OpenVPN not responding to shutdown signals when they are sent early on, causing it to close
+  after 30 seconds.
+- Disable notification actions for persistent notifications since they were called when pressing
+  close.
+- Remove deleted network devices from consideration in the offline monitor. Previously, the offline
+  monitor may have falsely reported the machine to be online due to a race condition.
+- Recover firewall state correctly when restarting the service after a crash. This would fail when
+  paths were excluded.
+- Fix daemon not starting when a path is excluded on a drive that has since been removed.
+
+
+## [2021.4] - 2021-06-30
+This release is for desktop only.
+
+This release is identical to 2021.4-beta1 except that it has translations for new texts in the UI.
+
+
+## [2021.4-beta1] - 2021-06-09
+This release is for desktop only.
+
 ### Added
 - When `MULLVAD_MANAGEMENT_SOCKET_GROUP` is set, only allow the specified group to access the
   management interface UDS socket. This means that only users in that group can use the CLI and GUI.
-- Support WireGuard over TCP for custom VPN relays in the CLI.
+- Support WireGuard over TCP for custom VPN relays in the CLI. (Our relays don't support this yet).
 - Make app native on Apple Silicon.
+- Support WireGuard multihop using an entry endpoint constraint in the CLI.
+- Add Ad and tracker blocking to the desktop app. Implemented via DNS on the relays.
+
+#### Windows
+- Add split tunneling as a beta feature. Allows excluding some applications from the VPN tunnel.
+
+#### Android
+- Added support of adaptive icons (available only from Android 8).
 
 ### Changed
 - Upgrade OpenVPN from 2.5.0 to 2.5.1.
+- Replace CLI command `mullvad custom-dns` with the new command `mullvad dns`.
+- Upgrade wireguard-go to `20210521230051` (Windows: v0.3.14)
 
 #### Linux
 - Only allow packets with the mark set to `0x6d6f6c65` to communicate with the relay server.
   Previously, bridges were expected to run as root instead.
+- Use an ICMP socket instead of relying on a `ping` binary in `$PATH` to establish if a tunnel is
+  working.
 
 #### Android
 - Improve stability by running the UI and the tunnel management logic in separate processes.
+- Remove dialog warning that only custom local DNS servers are supported, since public custom DNS
+  servers are now supported.
+
+#### macOS
+- Update shape of macOS icon to be in line with Apple's guidelines.
 
 ### Fixed
 - Fix relay selection failing to pick a WireGuard relay when no tunnel protocol is specified.
 - Fix time left not always being translated in desktop app settings.
+- Fix API address cache to use the supplied ports instead of always using port 443.
+- Do not try to parse an empty account history.
 
 #### Windows
-- Prevent tray icons from being extraced to `%TEMP%` directory.
+- Prevent tray icons from being extracted to `%TEMP%` directory.
+- Fix failure to create Wintun adapter due to a residual network interface by upgrading Wintun to
+  0.10.4.
+- Wait indefinitely for IP interfaces to attach to the tunnel device to prevent early timeouts,
+  and errors setting interface metrics.
+- Prevent Microsoft Store from dropping packets in WireGuard tunnels.
 
 #### Linux
 - Fix find `mullvad-vpn.desktop` in `XDG_DATA_DIRS` instead of using hardcoded path.
@@ -52,6 +122,7 @@ Line wrap the file at 100 chars.                                              Th
 #### MacOS
 - Set correct permissions for daemon's launch file in installer.
 - Fix downgrades on macOS silently keeping previous version.
+- Fix other menubar context menus not always closing when opening app on macOS 11.
 
 #### Android
 - Fix UI sometimes not updating correctly while no split screen or after having a dialog from
@@ -59,6 +130,13 @@ Line wrap the file at 100 chars.                                              Th
 - Fix request to connect from notification or quick-settings tile not connecting if VPN permission
   isn't granted to the app. The app will now show the UI to ask for the permission and correctly
   connect after it is granted.
+- Fix quick-settings tile sometimes showing the wrong tunnel state.
+- Fix TV-only apps not appearing in the Split Tunneling screen.
+
+### Security
+#### Linux
+- Drop packets being *forwarded* unless they are approved by the same rules as incoming or outgoing
+  traffic.
 
 
 ## [2021.3] - 2021-04-28
@@ -86,19 +164,13 @@ This release is for desktop only.
 #### Linux
 - Always enable `src_valid_mark` config option when connecting to allow policty based routing.
 
-#### Android
-- Added support of adaptive icons (available only from Android 8).
-
 ### Changed
 - Allow whitespace in account token in CLI.
 - Read account token from standard input unless given as an argument in CLI.
 - Make WireGuard automatic key rotation interval mandatory and between 1 and 7 days.
 - Show default, minimum, and maximum key rotation intervals in CLI.
 - Attempt to send problem reports using other endpoints if using the primary one fails.
-
-#### Android
-- Remove dialog warning that only custom local DNS servers are supported, since public custom DNS
-  servers are now supported.
+- Upgrade wireguard-go to version 20210225140808 (Windows: v0.3.8)
 
 ### Fixed
 - Fix GUI not showing correct view if disconnected from the daemon during app startup.
@@ -115,13 +187,16 @@ This release is for desktop only.
 - Always reconnect appropriately after an upgrade. Previously, installing the app twice in
   succession, with auto-connect disabled, would cause it to re-launch in the disconnected state.
 
-#### Linux
-- Drop packets being forwarded unless they are approved by the same rules as incoming or outgoing
-  traffic.
+
+## [android/2021.1] - 2021-05-04
+This release is for Android only.
+
+This release is identical to android/2021.1-beta1.
+This is our first non beta release for the Android platform!
 
 
 ## [android/2021.1-beta1] - 2021-04-06
-This releas is for Android only. From now on, Android releases will have this new header format
+This release is for Android only. From now on, Android releases will have this new header format
 that is the same as the git tag they receive: `android/<version>`.
 
 ### Added

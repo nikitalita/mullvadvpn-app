@@ -32,14 +32,16 @@ class DisconnectSplitButton: UIView {
     private let stackView: UIStackView
 
     init() {
-        stackView = UIStackView(arrangedSubviews: [primaryButton, secondaryButton])
+        let primaryButtonBlurView = TranslucentButtonBlurView(button: primaryButton)
+        let secondaryButtonBlurView = TranslucentButtonBlurView(button: secondaryButton)
+
+        stackView = UIStackView(arrangedSubviews: [primaryButtonBlurView, secondaryButtonBlurView])
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.axis = .horizontal
         stackView.distribution = .fill
         stackView.alignment = .fill
         stackView.spacing = 1
 
-        primaryButton.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
         secondaryButton.setImage(UIImage(named: "IconReload"), for: .normal)
 
         primaryButton.overrideContentEdgeInsets = true

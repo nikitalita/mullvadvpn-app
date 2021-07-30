@@ -53,6 +53,7 @@ const config = {
     },
     artifactName: 'MullvadVPN-${version}.${ext}',
     category: 'public.app-category.tools',
+    icon: distAssets('icon-macos.icns'),
     extendInfo: {
       LSUIElement: true,
       NSUserNotificationAlertStyle: 'alert',
@@ -113,7 +114,7 @@ const config = {
       { from: distAssets('binaries/x86_64-pc-windows-msvc/openvpn.exe'), to: '.' },
       { from: distAssets('binaries/x86_64-pc-windows-msvc/sslocal.exe'), to: '.' },
       { from: root('build/lib/x86_64-pc-windows-msvc/libwg.dll'), to: '.' },
-      { from: distAssets('binaries/x86_64-pc-windows-msvc/wintun.dll'), to: '.' },
+      { from: distAssets('binaries/x86_64-pc-windows-msvc/wintun/wintun.dll'), to: '.' },
     ],
   },
 
@@ -121,6 +122,7 @@ const config = {
     target: ['deb', 'rpm'],
     artifactName: 'MullvadVPN-${version}_${arch}.${ext}',
     category: 'Network',
+    icon: distAssets('icon.icns'),
     extraFiles: [{ from: distAssets('linux/mullvad-gui-launcher.sh'), to: '.' }],
     extraResources: [
       { from: distAssets('mullvad-problem-report'), to: '.' },

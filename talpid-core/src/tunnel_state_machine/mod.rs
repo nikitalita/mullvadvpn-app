@@ -11,6 +11,8 @@ use self::{
     disconnecting_state::{AfterDisconnect, DisconnectingState},
     error_state::ErrorState,
 };
+#[cfg(windows)]
+use crate::split_tunnel;
 use crate::{
     dns::DnsMonitor,
     firewall::{Firewall, FirewallArguments},
@@ -19,6 +21,9 @@ use crate::{
     routing::RouteManager,
     tunnel::{tun_provider::TunProvider, TunnelEvent},
 };
+#[cfg(windows)]
+use std::ffi::OsString;
+
 use futures::{
     channel::{mpsc, oneshot},
     stream, StreamExt,
@@ -47,9 +52,9 @@ pub enum Error {
     OfflineMonitorError(#[error(source)] crate::offline::Error),
 
     /// Unable to set up split tunneling
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "windows")]
     #[error(display = "Failed to initialize split tunneling")]
-    InitSplitTunneling(#[error(source)] crate::split_tunnel::Error),
+    InitSplitTunneling(#[error(source)] split_tunnel::Error),
 
     /// Failed to initialize the system firewall integration.
     #[error(display = "Failed to initialize the system firewall integration")]
@@ -76,7 +81,7 @@ pub enum Error {
 pub async fn spawn(
     allow_lan: bool,
     block_when_disconnected: bool,
-    custom_dns: Option<Vec<IpAddr>>,
+    dns_servers: Option<Vec<IpAddr>>,
     allowed_endpoint: Endpoint,
     tunnel_parameters_generator: impl TunnelParametersGenerator,
     log_dir: Option<PathBuf>,
@@ -86,39 +91,33 @@ pub async fn spawn(
     shutdown_tx: oneshot::Sender<()>,
     reset_firewall: bool,
     #[cfg(target_os = "android")] android_context: AndroidContext,
+    #[cfg(windows)] exclude_paths: Vec<OsString>,
 ) -> Result<Arc<mpsc::UnboundedSender<TunnelCommand>>, Error> {
     let (command_tx, command_rx) = mpsc::unbounded();
     let command_tx = Arc::new(command_tx);
-    let mut offline_monitor = offline::spawn_monitor(
-        Arc::downgrade(&command_tx),
-        #[cfg(target_os = "android")]
-        android_context.clone(),
-    )
-    .await
-    .map_err(Error::OfflineMonitorError)?;
-    let is_offline = offline_monitor.is_offline().await;
 
     let tun_provider = TunProvider::new(
         #[cfg(target_os = "android")]
-        android_context,
+        android_context.clone(),
         #[cfg(target_os = "android")]
         allow_lan,
         #[cfg(target_os = "android")]
         allowed_endpoint.address.ip(),
         #[cfg(target_os = "android")]
-        custom_dns.clone(),
+        dns_servers.clone(),
     );
 
     let runtime = tokio::runtime::Handle::current();
 
     let (startup_result_tx, startup_result_rx) = sync_mpsc::channel();
+    let weak_command_tx = Arc::downgrade(&command_tx);
     std::thread::spawn(move || {
-        let state_machine = TunnelStateMachine::new(
+        let state_machine = runtime.block_on(TunnelStateMachine::new(
             runtime.clone(),
+            weak_command_tx,
             allow_lan,
             block_when_disconnected,
-            is_offline,
-            custom_dns,
+            dns_servers,
             allowed_endpoint,
             tunnel_parameters_generator,
             tun_provider,
@@ -127,7 +126,11 @@ pub async fn spawn(
             cache_dir,
             command_rx,
             reset_firewall,
-        );
+            #[cfg(target_os = "android")]
+            android_context,
+            #[cfg(windows)]
+            exclude_paths,
+        ));
         let state_machine = match state_machine {
             Ok(state_machine) => {
                 startup_result_tx.send(Ok(())).unwrap();
@@ -144,8 +147,6 @@ pub async fn spawn(
         if shutdown_tx.send(()).is_err() {
             log::error!("Can't send shutdown completion to daemon");
         }
-
-        std::mem::drop(offline_monitor);
     });
 
     startup_result_rx
@@ -161,8 +162,8 @@ pub enum TunnelCommand {
     /// Endpoint that should never be blocked.
     /// If an error occurs, the sender is dropped.
     AllowEndpoint(Endpoint, oneshot::Sender<()>),
-    /// Set custom DNS servers to use.
-    CustomDns(Option<Vec<IpAddr>>),
+    /// Set DNS servers to use.
+    Dns(Option<Vec<IpAddr>>),
     /// Enable or disable the block_when_disconnected feature.
     BlockWhenDisconnected(bool),
     /// Notify the state machine of the connectivity of the device.
@@ -176,13 +177,19 @@ pub enum TunnelCommand {
     /// Bypass a socket, allowing traffic to flow through outside the tunnel.
     #[cfg(target_os = "android")]
     BypassSocket(RawFd, oneshot::Sender<()>),
+    /// Set applications that are allowed to send and receive traffic outside of the tunnel.
+    #[cfg(windows)]
+    SetExcludedApps(
+        oneshot::Sender<Result<(), split_tunnel::Error>>,
+        Vec<OsString>,
+    ),
 }
 
 type TunnelCommandReceiver = stream::Fuse<mpsc::UnboundedReceiver<TunnelCommand>>;
 
 enum EventResult {
     Command(Option<TunnelCommand>),
-    Event(Option<TunnelEvent>),
+    Event(Option<(TunnelEvent, oneshot::Sender<()>)>),
     Close(Result<Option<ErrorStateCause>, oneshot::Canceled>),
 }
 
@@ -199,21 +206,27 @@ struct TunnelStateMachine {
 }
 
 impl TunnelStateMachine {
-    fn new(
+    async fn new(
         runtime: tokio::runtime::Handle,
+        command_tx: std::sync::Weak<mpsc::UnboundedSender<TunnelCommand>>,
         allow_lan: bool,
         block_when_disconnected: bool,
-        is_offline: bool,
-        custom_dns: Option<Vec<IpAddr>>,
+        dns_servers: Option<Vec<IpAddr>>,
         allowed_endpoint: Endpoint,
         tunnel_parameters_generator: impl TunnelParametersGenerator,
         tun_provider: TunProvider,
         log_dir: Option<PathBuf>,
         resource_dir: PathBuf,
         cache_dir: impl AsRef<Path>,
-        commands: mpsc::UnboundedReceiver<TunnelCommand>,
+        commands_rx: mpsc::UnboundedReceiver<TunnelCommand>,
         reset_firewall: bool,
+        #[cfg(target_os = "android")] android_context: AndroidContext,
+        #[cfg(windows)] exclude_paths: Vec<OsString>,
     ) -> Result<Self, Error> {
+        #[cfg(windows)]
+        let split_tunnel = split_tunnel::SplitTunnel::new(command_tx.clone())
+            .map_err(Error::InitSplitTunneling)?;
+
         let args = FirewallArguments {
             initialize_blocked: block_when_disconnected || !reset_firewall,
             allow_lan,
@@ -221,18 +234,48 @@ impl TunnelStateMachine {
         };
 
         let firewall = Firewall::new(args).map_err(Error::InitFirewallError)?;
-        let dns_monitor = DnsMonitor::new(cache_dir).map_err(Error::InitDnsMonitorError)?;
         let route_manager = RouteManager::new(runtime.clone(), HashSet::new())
+            .await
             .map_err(Error::InitRouteManagerError)?;
+        let dns_monitor = DnsMonitor::new(
+            runtime.clone(),
+            cache_dir,
+            #[cfg(target_os = "linux")]
+            route_manager
+                .handle()
+                .map_err(Error::InitRouteManagerError)?,
+        )
+        .map_err(Error::InitDnsMonitorError)?;
+        let mut offline_monitor = offline::spawn_monitor(
+            command_tx,
+            #[cfg(target_os = "linux")]
+            route_manager
+                .handle()
+                .map_err(Error::InitRouteManagerError)?,
+            #[cfg(target_os = "android")]
+            android_context,
+        )
+        .await
+        .map_err(Error::OfflineMonitorError)?;
+        let is_offline = offline_monitor.is_offline().await;
+
+        #[cfg(windows)]
+        split_tunnel
+            .set_paths(&exclude_paths)
+            .map_err(Error::InitSplitTunneling)?;
+
         let mut shared_values = SharedTunnelStateValues {
+            #[cfg(windows)]
+            split_tunnel,
             runtime,
             firewall,
             dns_monitor,
             route_manager,
+            _offline_monitor: offline_monitor,
             allow_lan,
             block_when_disconnected,
             is_offline,
-            custom_dns,
+            dns_servers,
             allowed_endpoint,
             tunnel_parameters_generator: Box::new(tunnel_parameters_generator),
             tun_provider,
@@ -246,7 +289,7 @@ impl TunnelStateMachine {
 
         Ok(TunnelStateMachine {
             current_state: Some(initial_state),
-            commands: commands.fuse(),
+            commands: commands_rx.fuse(),
             shared_values,
         })
     }
@@ -294,18 +337,24 @@ pub trait TunnelParametersGenerator: Send + 'static {
 
 /// Values that are common to all tunnel states.
 struct SharedTunnelStateValues {
+    /// Management of excluded apps.
+    /// This object should be dropped before deinitializing WinFw (dropping the `Firewall`
+    /// instance), since the driver may add filters to the same sublayer.
+    #[cfg(windows)]
+    split_tunnel: split_tunnel::SplitTunnel,
     runtime: tokio::runtime::Handle,
     firewall: Firewall,
     dns_monitor: DnsMonitor,
     route_manager: RouteManager,
+    _offline_monitor: offline::MonitorHandle,
     /// Should LAN access be allowed outside the tunnel.
     allow_lan: bool,
     /// Should network access be allowed when in the disconnected state.
     block_when_disconnected: bool,
     /// True when the computer is known to be offline.
     is_offline: bool,
-    /// Custom DNS servers to use.
-    custom_dns: Option<Vec<IpAddr>>,
+    /// DNS servers to use (overriding default).
+    dns_servers: Option<Vec<IpAddr>>,
     /// Endpoint that should not be blocked by the firewall.
     allowed_endpoint: Endpoint,
     /// The generator of new `TunnelParameter`s
@@ -359,20 +408,20 @@ impl SharedTunnelStateValues {
         }
     }
 
-    pub fn set_custom_dns(
+    pub fn set_dns_servers(
         &mut self,
-        custom_dns: Option<Vec<IpAddr>>,
+        dns_servers: Option<Vec<IpAddr>>,
     ) -> Result<bool, ErrorStateCause> {
-        if self.custom_dns != custom_dns {
-            self.custom_dns = custom_dns.clone();
+        if self.dns_servers != dns_servers {
+            self.dns_servers = dns_servers.clone();
 
             #[cfg(target_os = "android")]
             {
-                if let Err(error) = self.tun_provider.set_custom_dns_servers(custom_dns) {
+                if let Err(error) = self.tun_provider.set_dns_servers(dns_servers) {
                     log::error!(
                         "{}",
                         error.display_chain_with_msg(
-                            "Failed to restart tunnel after changing custom DNS servers",
+                            "Failed to restart tunnel after changing DNS servers",
                         )
                     );
                     return Err(ErrorStateCause::StartTunnelError);

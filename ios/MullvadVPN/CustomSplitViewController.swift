@@ -10,9 +10,9 @@ import UIKit
 
 class CustomSplitViewController: UISplitViewController, RootContainment {
 
-    var preferredHeaderBarStyle: HeaderBarStyle {
+    var preferredHeaderBarPresentation: HeaderBarPresentation {
         for case let viewController as RootContainment in viewControllers {
-            return viewController.preferredHeaderBarStyle
+            return viewController.preferredHeaderBarPresentation
         }
         return .default
     }
@@ -52,6 +52,20 @@ class CustomSplitViewController: UISplitViewController, RootContainment {
         guard let dividerColor = dividerColor else { return }
 
         dividerView?.backgroundColor = dividerColor
+    }
+
+    override func overrideTraitCollection(forChild childViewController: UIViewController) -> UITraitCollection? {
+        guard let traitCollection = super.overrideTraitCollection(forChild: childViewController) else { return nil }
+
+        // Pass the split controller's horizontal size class to the primary controller when split
+        // view is expanded.
+        if !self.isCollapsed, childViewController == self.viewControllers.last {
+            let sizeOverrideTraitCollection = UITraitCollection(horizontalSizeClass: self.traitCollection.horizontalSizeClass)
+
+            return UITraitCollection(traitsFrom: [traitCollection, sizeOverrideTraitCollection])
+        } else {
+            return traitCollection
+        }
     }
 
 }

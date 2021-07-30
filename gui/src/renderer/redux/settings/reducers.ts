@@ -1,3 +1,4 @@
+import { IApplication } from '../../../shared/application-types';
 import {
   BridgeState,
   KeygenEvent,
@@ -6,6 +7,7 @@ import {
   RelayLocation,
   RelayProtocol,
   TunnelProtocol,
+  IDnsOptions,
 } from '../../../shared/daemon-rpc-types';
 import { IGuiSettingsState } from '../../../shared/gui-settings-state';
 import log from '../../../shared/logging';
@@ -133,11 +135,10 @@ export interface ISettingsReduxState {
   wireguard: {
     mtu?: number;
   };
-  dns: {
-    custom: boolean;
-    addresses: string[];
-  };
+  dns: IDnsOptions;
   wireguardKeyState: WgKeyState;
+  splitTunneling: boolean;
+  splitTunnelingApplications: IApplication[];
 }
 
 const initialState: ISettingsReduxState = {
@@ -148,7 +149,7 @@ const initialState: ISettingsReduxState = {
     autoConnect: true,
     monochromaticIcon: false,
     startMinimized: false,
-    unpinnedWindow: window.platform !== 'win32' && window.platform !== 'darwin',
+    unpinnedWindow: window.env.platform !== 'win32' && window.env.platform !== 'darwin',
     browsedForSplitTunnelingApplications: [],
   },
   relaySettings: {
@@ -180,9 +181,17 @@ const initialState: ISettingsReduxState = {
     type: 'key-not-set',
   },
   dns: {
-    custom: false,
-    addresses: [],
+    state: 'default',
+    defaultOptions: {
+      blockAds: false,
+      blockTrackers: false,
+    },
+    customOptions: {
+      addresses: [],
+    },
   },
+  splitTunneling: false,
+  splitTunnelingApplications: [],
 };
 
 export default function (
@@ -314,6 +323,18 @@ export default function (
       return {
         ...state,
         dns: action.dns,
+      };
+
+    case 'UPDATE_SPLIT_TUNNELING_STATE':
+      return {
+        ...state,
+        splitTunneling: action.enabled,
+      };
+
+    case 'SET_SPLIT_TUNNELING_APPLICATIONS':
+      return {
+        ...state,
+        splitTunnelingApplications: action.applications,
       };
 
     default:

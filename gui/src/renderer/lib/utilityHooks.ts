@@ -25,3 +25,21 @@ export function assignToRef<T>(element: T | null, ref?: React.Ref<T>) {
     (ref as React.MutableRefObject<T>).current = element;
   }
 }
+
+export function useAsyncEffect(
+  effect: () => Promise<void | (() => void | Promise<void>)>,
+  dependencies: unknown[],
+): void {
+  const isMounted = useMounted();
+
+  useEffect(() => {
+    const promise = effect();
+    return () => {
+      void promise.then((destructor) => {
+        if (isMounted() && destructor) {
+          return destructor();
+        }
+      });
+    };
+  }, dependencies);
+}

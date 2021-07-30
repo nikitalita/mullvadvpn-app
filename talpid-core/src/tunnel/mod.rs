@@ -1,7 +1,5 @@
 use self::tun_provider::TunProvider;
 use crate::{logging, routing::RouteManager};
-#[cfg(not(target_os = "android"))]
-use std::collections::HashMap;
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -23,6 +21,9 @@ pub mod wireguard;
 
 /// A module for low level platform specific tunnel device management.
 pub(crate) mod tun_provider;
+
+#[cfg(target_os = "windows")]
+mod windows;
 
 const OPENVPN_LOG_FILENAME: &str = "openvpn.log";
 const WIREGUARD_LOG_FILENAME: &str = "wireguard.log";
@@ -70,6 +71,8 @@ pub enum Error {
 pub enum TunnelEvent {
     /// Sent when the tunnel fails to connect due to an authentication error.
     AuthFailed(Option<String>),
+    /// Sent when the tunnel interface has been created, before routes are set up.
+    InterfaceUp(TunnelMetadata),
     /// Sent when the tunnel comes up and is ready for traffic.
     Up(TunnelMetadata),
     /// Sent when the tunnel goes down.
@@ -89,54 +92,6 @@ pub struct TunnelMetadata {
     pub ipv6_gateway: Option<Ipv6Addr>,
 }
 
-#[cfg(not(target_os = "android"))]
-impl TunnelEvent {
-    /// Converts an `openvpn_plugin::EventType` to a `TunnelEvent`.
-    /// Returns `None` if there is no corresponding `TunnelEvent`.
-    fn from_openvpn_event(
-        event: openvpn_plugin::EventType,
-        env: &HashMap<String, String>,
-    ) -> Option<TunnelEvent> {
-        match event {
-            openvpn_plugin::EventType::AuthFailed => {
-                let reason = env.get("auth_failed_reason").cloned();
-                Some(TunnelEvent::AuthFailed(reason))
-            }
-            openvpn_plugin::EventType::RouteUp => {
-                let interface = env
-                    .get("dev")
-                    .expect("No \"dev\" in tunnel up event")
-                    .to_owned();
-                let mut ips = vec![env
-                    .get("ifconfig_local")
-                    .expect("No \"ifconfig_local\" in tunnel up event")
-                    .parse()
-                    .expect("Tunnel IP not in valid format")];
-                if let Some(ipv6_address) = env.get("ifconfig_ipv6_local") {
-                    ips.push(ipv6_address.parse().expect("Tunnel IP not in valid format"));
-                }
-                let ipv4_gateway = env
-                    .get("route_vpn_gateway")
-                    .expect("No \"route_vpn_gateway\" in tunnel up event")
-                    .parse()
-                    .expect("Tunnel gateway IP not in valid format");
-                let ipv6_gateway = env.get("route_ipv6_gateway_1").map(|v6_str| {
-                    v6_str
-                        .parse()
-                        .expect("V6 Tunnel gateway IP not in valid format")
-                });
-                Some(TunnelEvent::Up(TunnelMetadata {
-                    interface,
-                    ips,
-                    ipv4_gateway,
-                    ipv6_gateway,
-                }))
-            }
-            openvpn_plugin::EventType::RoutePredown => Some(TunnelEvent::Down),
-            _ => None,
-        }
-    }
-}
 /// Abstraction for monitoring a generic VPN tunnel.
 pub struct TunnelMonitor {
     monitor: InternalTunnelMonitor,
@@ -157,7 +112,11 @@ impl TunnelMonitor {
         route_manager: &mut RouteManager,
     ) -> Result<Self>
     where
-        L: Fn(TunnelEvent) + Send + Clone + Sync + 'static,
+        L: (Fn(TunnelEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
+            + Send
+            + Clone
+            + Sync
+            + 'static,
     {
         Self::ensure_ipv6_can_be_used_if_enabled(&tunnel_parameters)?;
         let log_file = Self::prepare_tunnel_log_file(&tunnel_parameters, log_dir)?;
@@ -210,7 +169,11 @@ impl TunnelMonitor {
         route_manager: &mut RouteManager,
     ) -> Result<Self>
     where
-        L: Fn(TunnelEvent) + Send + Sync + Clone + 'static,
+        L: (Fn(TunnelEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
+            + Send
+            + Sync
+            + Clone
+            + 'static,
     {
         let config = wireguard::config::Config::from_parameters(&params)?;
         let monitor = wireguard::WireguardMonitor::start(
@@ -235,7 +198,10 @@ impl TunnelMonitor {
         route_manager: &mut RouteManager,
     ) -> Result<Self>
     where
-        L: Fn(TunnelEvent) + Send + Sync + 'static,
+        L: (Fn(TunnelEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
+            + Send
+            + Sync
+            + 'static,
     {
         let monitor =
             openvpn::OpenVpnMonitor::start(on_event, config, log, resource_dir, route_manager)?;

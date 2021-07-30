@@ -47,7 +47,6 @@ service ManagementService {
 	rpc SetAccount(google.protobuf.StringValue) returns (google.protobuf.Empty) {}
 	rpc GetAccountData(google.protobuf.StringValue) returns (AccountData) {}
 	rpc GetAccountHistory(google.protobuf.Empty) returns (AccountHistory) {}
-	rpc RemoveAccountFromHistory(google.protobuf.StringValue) returns (google.protobuf.Empty) {}
 	rpc ClearAccountHistory(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 	rpc GetWwwAuthToken(google.protobuf.Empty) returns (google.protobuf.StringValue) {}
 	rpc SubmitVoucher(google.protobuf.StringValue) returns (VoucherSubmission) {}
@@ -59,11 +58,17 @@ service ManagementService {
 	rpc GetWireguardKey(google.protobuf.Empty) returns (PublicKey) {}
 	rpc VerifyWireguardKey(google.protobuf.Empty) returns (google.protobuf.BoolValue) {}
 
-	// Split tunneling
+	// Split tunneling (Linux)
 	rpc GetSplitTunnelProcesses(google.protobuf.Empty) returns (stream google.protobuf.Int32Value) {}
 	rpc AddSplitTunnelProcess(google.protobuf.Int32Value) returns (google.protobuf.Empty) {}
 	rpc RemoveSplitTunnelProcess(google.protobuf.Int32Value) returns (google.protobuf.Empty) {}
 	rpc ClearSplitTunnelProcesses(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+
+	// Split tunneling (Windows)
+	rpc AddSplitTunnelApp(google.protobuf.StringValue) returns (google.protobuf.Empty) {}
+	rpc RemoveSplitTunnelApp(google.protobuf.StringValue) returns (google.protobuf.Empty) {}
+	rpc ClearSplitTunnelApps(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+	rpc SetSplitTunnelState(google.protobuf.BoolValue) returns (google.protobuf.Empty) {}
 }
 
 message RelaySettingsUpdate {
@@ -75,6 +80,10 @@ message RelaySettingsUpdate {
 
 message AccountData {
 	google.protobuf.Timestamp expiry = 1;
+}
+
+message AccountHistory {
+	google.protobuf.StringValue token = 1;
 }
 
 message VoucherSubmission {
@@ -98,6 +107,7 @@ message ErrorState {
 		TUNNEL_PARAMETER_ERROR = 5;
 		IS_OFFLINE = 6;
 		VPN_PERMISSION_DENIED = 7;
+		SPLIT_TUNNEL_ERROR = 8;
 	}
 
 	enum GenerationError {
@@ -170,11 +180,17 @@ message TunnelEndpoint {
 	TransportProtocol protocol = 2;
 	TunnelType tunnel_type = 3;
 	ProxyEndpoint proxy = 4;
+	Endpoint entry_endpoint = 5;
 }
 
 enum ProxyType {
 	SHADOWSOCKS = 0;
 	CUSTOM = 1;
+}
+
+message Endpoint {
+	string address = 1;
+	TransportProtocol protocol = 2;
 }
 
 message ProxyEndpoint {
@@ -193,10 +209,6 @@ message GeoIpLocation {
 	bool mullvad_exit_ip = 7;
 	string hostname = 8;
 	string bridge_hostname = 9;
-}
-
-message AccountHistory {
-	repeated string token = 1;
 }
 
 message BridgeSettings {
@@ -257,6 +269,12 @@ message Settings {
 	bool auto_connect = 7;
 	TunnelOptions tunnel_options = 8;
 	bool show_beta_releases = 9;
+	SplitTunnelSettings split_tunnel = 10;
+}
+
+message SplitTunnelSettings {
+	bool enable_exclusions = 1;
+	repeated string apps = 2;
 }
 
 message RelaySettings {
@@ -317,6 +335,7 @@ message WireguardConstraints {
 	// NOTE: optional
 	uint32 port = 1;
 	IpVersionConstraint ip_version = 2;
+	RelayLocation entry_location = 3;
 }
 
 message CustomRelaySettings {
@@ -376,9 +395,23 @@ message TunnelOptions {
 	DnsOptions dns_options = 4;
 }
 
+message DefaultDnsOptions {
+	bool block_ads = 1;
+	bool block_trackers = 2;
+}
+
+message CustomDnsOptions {
+	repeated string addresses = 1;
+}
+
 message DnsOptions {
-	bool custom = 1;
-	repeated string addresses = 2;
+	enum DnsState {
+		DEFAULT = 0;
+		CUSTOM = 1;
+	}
+	DnsState state = 1;
+	DefaultDnsOptions default_options = 2;
+	CustomDnsOptions custom_options = 3;
 }
 
 message PublicKey {

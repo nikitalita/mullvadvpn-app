@@ -17,7 +17,11 @@ enum AppStoreSubscription: String {
     var localizedTitle: String {
         switch self {
         case .thirtyDays:
-            return NSLocalizedString("Add 30 days time", comment: "")
+            return NSLocalizedString(
+                "APPSTORE_SUBSCRIPTION_TITLE_ADD_30_DAYS",
+                tableName: "AppStoreSubscriptions",
+                comment: "Title for non-renewable subscription that credits 30 days to user account."
+            )
         }
     }
 }
@@ -34,7 +38,7 @@ extension Set where Element == AppStoreSubscription {
     }
 }
 
-protocol AppStorePaymentObserver: class {
+protocol AppStorePaymentObserver: AnyObject {
     func appStorePaymentManager(
         _ manager: AppStorePaymentManager,
         transaction: SKPaymentTransaction,
@@ -85,7 +89,7 @@ private class AnyAppStorePaymentObserver: AppStorePaymentObserver, WeakObserverB
     }
 }
 
-protocol AppStorePaymentManagerDelegate: class {
+protocol AppStorePaymentManagerDelegate: AnyObject {
 
     /// Return the account token associated with the payment.
     /// Usually called for unfinished transactions coming back after the app was restarted.
@@ -127,7 +131,7 @@ class AppStorePaymentManager: NSObject, SKPaymentTransactionObserver {
     private let operationQueue = OperationQueue()
     private lazy var exclusivityController = ExclusivityController<ExlcusivityCategory>(operationQueue: operationQueue)
 
-    private let rest = MullvadRest(session: URLSession(configuration: .ephemeral))
+    private let rest = MullvadRest()
     private let queue: SKPaymentQueue
 
     private var observerList = ObserverList<AnyAppStorePaymentObserver>()
@@ -160,6 +164,7 @@ class AppStorePaymentManager: NSObject, SKPaymentTransactionObserver {
     }
 
     func startPaymentQueueMonitoring() {
+        self.logger.debug("Start payment queue monitoring.")
         queue.add(self)
     }
 
@@ -256,11 +261,13 @@ class AppStorePaymentManager: NSObject, SKPaymentTransactionObserver {
                 createApplePaymentOperation.addDidFinishBlockObserver { (operation, result) in
                     switch result {
                     case .success(let response):
-                        self.logger.info("AppStore Receipt was processed. Time added: \(response.timeAdded), New expiry: \(response.newExpiry)")
+                        self.logger.info("AppStore receipt was processed. Time added: \(response.timeAdded), New expiry: \(response.newExpiry)")
 
                         completionHandler(.success(response))
 
                     case .failure(let error):
+                        self.logger.error(chainedError: error, message: "Failed to upload the AppStore receipt")
+
                         completionHandler(.failure(.sendReceipt(error)))
                     }
                 }
@@ -269,6 +276,7 @@ class AppStorePaymentManager: NSObject, SKPaymentTransactionObserver {
 
             case .failure(let error):
                 self.logger.error(chainedError: error, message: "Failed to fetch the AppStore receipt")
+
                 completionHandler(.failure(.readReceipt(error)))
             }
         }
@@ -353,8 +361,6 @@ class AppStorePaymentManager: NSObject, SKPaymentTransactionObserver {
                     }
 
                 case .failure(let error):
-                    self.logger.error(chainedError: error, message: "Failed to upload the AppStore receipt")
-
                     self.observerList.forEach { (observer) in
                         observer.appStorePaymentManager(
                             self,

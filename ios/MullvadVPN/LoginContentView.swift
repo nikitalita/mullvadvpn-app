@@ -12,7 +12,7 @@ class LoginContentView: UIView {
 
     private var keyboardResponder: AutomaticKeyboardResponder?
 
-    lazy var titleLabel: UILabel = {
+    let titleLabel: UILabel = {
         let textLabel = UILabel()
         textLabel.font = UIFont.systemFont(ofSize: 32)
         textLabel.textColor = .white
@@ -33,10 +33,6 @@ class LoginContentView: UIView {
         inputGroup.translatesAutoresizingMaskIntoConstraints = false
         return inputGroup
     }()
-
-    var accountTextField: AccountTextField {
-        return accountInputGroup.textField
-    }
 
     let statusImageView: StatusImageView = {
         let imageView = StatusImageView(style: .failure)
@@ -72,14 +68,22 @@ class LoginContentView: UIView {
         textLabel.font = UIFont.systemFont(ofSize: 17)
         textLabel.textColor = UIColor.white.withAlphaComponent(0.6)
         textLabel.translatesAutoresizingMaskIntoConstraints = false
-        textLabel.text = NSLocalizedString("Don't have an account number?", comment: "")
+        textLabel.text = NSLocalizedString(
+            "CREATE_BUTTON_HEADER_LABEL",
+            tableName: "Login",
+            comment: ""
+        )
         return textLabel
     }()
 
     let createAccountButton: AppButton = {
         let button = AppButton(style: .default)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.setTitle(NSLocalizedString("Create account", comment: ""), for: .normal)
+        button.setTitle(NSLocalizedString(
+            "CREATE_ACCOUNT_BUTTON_LABEL",
+            tableName: "Login",
+            comment: ""
+        ), for: .normal)
         return button
     }()
 
@@ -98,6 +102,8 @@ class LoginContentView: UIView {
 
         backgroundColor = .primaryColor
         layoutMargins = UIMetrics.contentLayoutMargins
+
+        accountInputGroup.textField.accessibilityIdentifier = "LoginTextField"
 
         keyboardResponder = AutomaticKeyboardResponder(targetView: self, handler: { [weak self] (view, adjustment) in
             self?.contentContainerBottomConstraint?.constant = adjustment

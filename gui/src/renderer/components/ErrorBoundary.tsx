@@ -4,6 +4,7 @@ import { colors, supportEmail } from '../../config.json';
 import { messages } from '../../shared/gettext';
 import log from '../../shared/logging';
 import PlatformWindowContainer from '../containers/PlatformWindowContainer';
+import { sourceSansPro } from './common-styles';
 import ImageView from './ImageView';
 import { Container, Layout } from './Layout';
 
@@ -24,9 +25,8 @@ const StyledContainer = styled(Container)({
 });
 
 const Title = styled.h1({
-  fontFamily: 'DINPro',
-  fontSize: '24px',
-  fontWeight: 900,
+  ...sourceSansPro,
+  fontSize: '26px',
   lineHeight: '30px',
   color: colors.white60,
   marginBottom: '4px',
@@ -78,7 +78,7 @@ export default class ErrorBoundary extends React.Component<IProps, IState> {
           <Layout>
             <StyledContainer>
               <Logo height={106} width={106} source="logo-icon" />
-              <Title>{messages.pgettext('generic', 'MULLVAD VPN')}</Title>
+              <Title>MULLVAD VPN</Title>
               <Subtitle role="alert">{reachBackMessage}</Subtitle>
             </StyledContainer>
           </Layout>

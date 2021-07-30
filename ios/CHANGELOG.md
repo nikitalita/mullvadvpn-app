@@ -24,7 +24,30 @@ Line wrap the file at 100 chars.                                              Th
 
 ## [Unreleased]
 ### Added
+- Show a reminder to add more credits 3 days before account expiry via system notification and in-app message.
+- Add submit button next to account input field on login screen.
+
+### Fixed
+- Update WireGuardKit to the latest. Fixes iOS 15 support.
+- Improve accessibility support.
+
+## [2021.2] - 2021-06-03
+### Added
 - Enable option to "Select all" when viewing app logs.
+- Split view interface for iPad.
+- Add interactive map.
+- Reduce network traffic consumption by leveraging HTTP caching via ETag HTTP header to avoid 
+  re-downloading the relay list if it hasn't changed.
+- Pin root SSL certificates.
+- Add option to use Mullvad's ad-blocking DNS servers.
+
+### Fixed
+- Fix bug which caused the tunnel manager to become unresponsive in the rare event of failure to
+  disable on-demand when stopping the tunnel from within the app.
+- Fix bug that caused the app to skip tunnel settings migration from older versions of the app.
+- Localize some of well known StoreKit errors so that they look less cryptic when presented to user.
+- Improve tunnel settings verification to address issues with broken tunnel and missing Keychain
+  entries to tunnel settings in cases such as when setting up a new device from backup.
 
 
 ## [2021.1] - 2021-03-16

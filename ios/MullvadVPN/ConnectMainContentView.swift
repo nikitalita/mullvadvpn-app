@@ -7,6 +7,7 @@
 //
 
 import UIKit
+import MapKit
 
 class ConnectMainContentView: UIView {
     enum ActionButton {
@@ -15,9 +16,29 @@ class ConnectMainContentView: UIView {
         case selectLocation
     }
 
+    lazy var mapView: MKMapView = {
+        let mapView = MKMapView()
+        mapView.translatesAutoresizingMaskIntoConstraints = true
+        mapView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        mapView.showsUserLocation = false
+        mapView.isZoomEnabled = false
+        mapView.isScrollEnabled = false
+        mapView.isUserInteractionEnabled = false
+        mapView.accessibilityElementsHidden = true
+        return mapView
+    }()
+
     let secureLabel = makeBoldTextLabel(ofSize: 20)
-    let countryLabel = makeBoldTextLabel(ofSize: 34)
     let cityLabel = makeBoldTextLabel(ofSize: 34)
+    let countryLabel = makeBoldTextLabel(ofSize: 34)
+
+    let locationContainerView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isAccessibilityElement = true
+        view.accessibilityTraits = .summaryElement
+        return view
+    }()
 
     lazy var connectionPanel: ConnectionPanelView = {
         let view = ConnectionPanelView()
@@ -27,7 +48,7 @@ class ConnectMainContentView: UIView {
 
     lazy var buttonsStackView: UIStackView = {
         let stackView = UIStackView()
-        stackView.spacing = 16
+        stackView.spacing = UIMetrics.interButtonSpacing
         stackView.axis = .vertical
         stackView.translatesAutoresizingMaskIntoConstraints = false
         return stackView
@@ -36,7 +57,6 @@ class ConnectMainContentView: UIView {
     lazy var connectButton: AppButton = {
         let button = AppButton(style: .success)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
         return button
     }()
 
@@ -44,8 +64,11 @@ class ConnectMainContentView: UIView {
         let button = AppButton(style: .translucentNeutral)
         button.accessibilityIdentifier = "SelectLocationButton"
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
         return button
+    }()
+
+    lazy var selectLocationBlurView: TranslucentButtonBlurView = {
+        return TranslucentButtonBlurView(button: selectLocationButton)
     }()
 
     let splitDisconnectButton: DisconnectSplitButton = {
@@ -69,6 +92,10 @@ class ConnectMainContentView: UIView {
         backgroundColor = .primaryColor
         layoutMargins = UIMetrics.contentLayoutMargins
 
+        if #available(iOS 13.0, *) {
+            accessibilityContainerType = .semanticGroup
+        }
+
         addSubviews()
     }
 
@@ -91,27 +118,42 @@ class ConnectMainContentView: UIView {
     }
 
     private func addSubviews() {
+        mapView.frame = self.bounds
+
+        locationContainerView.addSubview(secureLabel)
+        locationContainerView.addSubview(cityLabel)
+        locationContainerView.addSubview(countryLabel)
+
+        containerView.addSubview(locationContainerView)
+        containerView.addSubview(connectionPanel)
+        containerView.addSubview(buttonsStackView)
+
+        addSubview(mapView)
         addSubview(containerView)
-        [secureLabel, countryLabel, cityLabel, connectionPanel, buttonsStackView].forEach { containerView.addSubview($0) }
 
         NSLayoutConstraint.activate([
             containerView.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),
             containerView.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
             containerView.bottomAnchor.constraint(equalTo: layoutMarginsGuide.bottomAnchor),
 
-            secureLabel.topAnchor.constraint(greaterThanOrEqualTo: containerView.topAnchor),
-            secureLabel.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            secureLabel.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            locationContainerView.topAnchor.constraint(greaterThanOrEqualTo: containerView.topAnchor),
+            locationContainerView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            locationContainerView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
 
-            countryLabel.topAnchor.constraint(equalTo: secureLabel.bottomAnchor, constant: 8),
-            countryLabel.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            countryLabel.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            secureLabel.topAnchor.constraint(equalTo: locationContainerView.topAnchor),
+            secureLabel.leadingAnchor.constraint(equalTo: locationContainerView.leadingAnchor),
+            secureLabel.trailingAnchor.constraint(equalTo: locationContainerView.trailingAnchor),
 
-            cityLabel.topAnchor.constraint(equalTo: countryLabel.bottomAnchor, constant: 8),
-            cityLabel.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            cityLabel.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            cityLabel.topAnchor.constraint(equalTo: secureLabel.bottomAnchor, constant: 8),
+            cityLabel.leadingAnchor.constraint(equalTo: locationContainerView.leadingAnchor),
+            cityLabel.trailingAnchor.constraint(equalTo: locationContainerView.trailingAnchor),
 
-            connectionPanel.topAnchor.constraint(equalTo: cityLabel.bottomAnchor, constant: 8),
+            countryLabel.topAnchor.constraint(equalTo: cityLabel.bottomAnchor, constant: 8),
+            countryLabel.leadingAnchor.constraint(equalTo: locationContainerView.leadingAnchor),
+            countryLabel.trailingAnchor.constraint(equalTo: locationContainerView.trailingAnchor),
+            countryLabel.bottomAnchor.constraint(equalTo: locationContainerView.bottomAnchor),
+
+            connectionPanel.topAnchor.constraint(equalTo: locationContainerView.bottomAnchor, constant: 8),
             connectionPanel.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
             connectionPanel.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
 
@@ -179,7 +221,7 @@ class ConnectMainContentView: UIView {
         case .disconnect:
             return splitDisconnectButton
         case .selectLocation:
-            return selectLocationButton
+            return selectLocationBlurView
         }
     }
 }

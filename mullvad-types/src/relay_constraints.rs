@@ -17,6 +17,10 @@ pub trait Match<T> {
     fn matches(&self, other: &T) -> bool;
 }
 
+pub trait Set<T> {
+    fn is_subset(&self, other: &T) -> bool;
+}
+
 /// Limits the set of [`crate::relay_list::Relay`]s that a `RelaySelector` may select.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +106,20 @@ impl<T: fmt::Debug + Clone + Eq + Match<U>, U> Match<U> for Constraint<T> {
         match *self {
             Constraint::Any => true,
             Constraint::Only(ref value) => value.matches(other),
+        }
+    }
+}
+
+impl<T: fmt::Debug + Clone + Eq + Set<U>, U: fmt::Debug + Clone + Eq> Set<Constraint<U>>
+    for Constraint<T>
+{
+    fn is_subset(&self, other: &Constraint<U>) -> bool {
+        match self {
+            Constraint::Any => *other == Constraint::Any,
+            Constraint::Only(ref constraint) => match other {
+                Constraint::Only(ref other_constraint) => constraint.is_subset(other_constraint),
+                _ => true,
+            },
         }
     }
 }
@@ -302,6 +320,27 @@ impl Match<Relay> for LocationConstraint {
     }
 }
 
+impl Set<LocationConstraint> for LocationConstraint {
+    /// Returns whether `self` is equal to or a subset of `other`.
+    fn is_subset(&self, other: &Self) -> bool {
+        match self {
+            LocationConstraint::Country(_) => self == other,
+            LocationConstraint::City(ref country, ref _city) => match other {
+                LocationConstraint::Country(ref other_country) => country == other_country,
+                LocationConstraint::City(..) => self == other,
+                _ => false,
+            },
+            LocationConstraint::Hostname(ref country, ref city, ref _hostname) => match other {
+                LocationConstraint::Country(ref other_country) => country == other_country,
+                LocationConstraint::City(ref other_country, ref other_city) => {
+                    country == other_country && city == other_city
+                }
+                LocationConstraint::Hostname(..) => self == other,
+            },
+        }
+    }
+}
+
 /// Limits the set of [`crate::relay_list::Relay`]s used by a `RelaySelector` based on
 /// provider.
 pub type Provider = String;
@@ -434,11 +473,12 @@ impl Match<OpenVpnEndpointData> for OpenVpnConstraints {
 }
 
 /// [`Constraint`]s applicable to WireGuard relay servers.
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WireguardConstraints {
     pub port: Constraint<u16>,
     pub ip_version: Constraint<IpVersion>,
+    pub entry_location: Option<Constraint<LocationConstraint>>,
 }
 
 impl fmt::Display for WireguardConstraints {
@@ -449,8 +489,13 @@ impl fmt::Display for WireguardConstraints {
         }
         write!(f, " over ")?;
         match self.ip_version {
-            Constraint::Any => write!(f, "IPv4 or IPv6"),
-            Constraint::Only(protocol) => write!(f, "{}", protocol),
+            Constraint::Any => write!(f, "IPv4 or IPv6")?,
+            Constraint::Only(protocol) => write!(f, "{}", protocol)?,
+        }
+        if let Some(Constraint::Only(ref entry)) = self.entry_location {
+            write!(f, " (via {})", entry)
+        } else {
+            Ok(())
         }
     }
 }
@@ -498,7 +543,7 @@ impl fmt::Display for BridgeConstraints {
 }
 
 /// Setting indicating whether to connect to a bridge server, or to handle it automatically.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BridgeState {
     Auto,

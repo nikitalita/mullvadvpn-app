@@ -10,22 +10,53 @@ import Foundation
 import UIKit
 
 class HeaderBarView: UIView {
-    let logoImageView = UIImageView(image: UIImage(named: "LogoIcon"))
+    let logoImageView: UIImageView = {
+        let imageView = UIImageView(image: UIImage(named: "LogoIcon"))
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        return imageView
+    }()
 
     lazy var titleLabel: UILabel = {
         let titleLabel = UILabel()
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.text = "MULLVAD VPN"
         titleLabel.font = UIFont.boldSystemFont(ofSize: 24)
         titleLabel.textColor = UIColor.white.withAlphaComponent(0.8)
+        titleLabel.accessibilityTraits.insert(.header)
         return titleLabel
     }()
 
-    lazy var settingsButton: UIButton = {
+    let settingsButton = makeSettingsButton()
+
+    class func makeSettingsButton() -> UIButton {
         let settingsButton = UIButton(type: .custom)
         settingsButton.setImage(UIImage(named: "IconSettings"), for: .normal)
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
         settingsButton.accessibilityIdentifier = "SettingsButton"
+        settingsButton.accessibilityLabel = NSLocalizedString(
+            "HEADER_BAR_SETTINGS_BUTTON_ACCESSIBILITY_LABEL",
+            tableName: "HeaderBar",
+            value: "Settings",
+            comment: ""
+        )
         return settingsButton
+    }
+
+    private let borderLayer: CALayer = {
+        let layer = CALayer()
+        layer.backgroundColor = UIColor.HeaderBar.dividerColor.cgColor
+        return layer
     }()
+
+    var showsDivider = false {
+        didSet {
+            if showsDivider {
+                layer.addSublayer(borderLayer)
+            } else {
+                borderLayer.removeFromSuperlayer()
+            }
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -36,6 +67,10 @@ class HeaderBarView: UIView {
             bottom: 0,
             right: UIMetrics.contentLayoutMargins.right
         )
+
+        if #available(iOS 13.0, *) {
+            accessibilityContainerType = .semanticGroup
+        }
 
         let constraints = [
             logoImageView.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
@@ -52,15 +87,18 @@ class HeaderBarView: UIView {
             settingsButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor)
         ]
 
-        for view in [logoImageView, titleLabel, settingsButton] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
+        [logoImageView, titleLabel, settingsButton].forEach { addSubview($0) }
 
         NSLayoutConstraint.activate(constraints)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        borderLayer.frame = CGRect(x: 0, y: frame.maxY - 1, width: frame.width, height: 1)
     }
 }

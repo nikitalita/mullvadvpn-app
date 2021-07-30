@@ -8,11 +8,12 @@ edition = "2018"
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 atty = "0.2"
 cfg-if = "1.0"
 duct = "0.13"
 err-derive = "0.3.0"
-futures = "0.3"
+futures = "0.3.15"
 hex = "0.4"
 ipnetwork = "0.16"
 lazy_static = "1.0"
@@ -26,17 +27,18 @@ talpid-types = { path = "../talpid-types" }
 uuid = { version = "0.8", features = ["v4"] }
 zeroize = "1"
 chrono = "0.4"
-tokio = { version = "0.2", features = [ "process", "rt-threaded", "stream" ] }
+tokio = { version = "1.8", features = [ "process", "rt-multi-thread", "fs" ] }
+tokio-stream = "0.1"
 rand = "0.7"
-udp-over-tcp = { git = "https://github.com/mullvad/udp-over-tcp", rev = "3d1abafe112ee8c2db47ca401f8e286756454e7a" }
+udp-over-tcp = { git = "https://github.com/mullvad/udp-over-tcp", rev = "1e27324362ed123b61fa2062b1599e5f9d569796" }
 
 
 [target.'cfg(not(target_os="android"))'.dependencies]
 openvpn-plugin = { version = "0.4", features = ["serde", "auth-failed-event"] }
-parity-tokio-ipc = "0.8"
+parity-tokio-ipc = "0.9"
 triggered = "0.1.1"
-tonic = "0.3.1"
-prost = "0.6"
+tonic = "0.5"
+prost = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.19"
@@ -50,18 +52,20 @@ jnix = { version = "0.4", features = ["derive"] }
 failure = "0.1"
 notify = "4.0"
 resolv-conf = "0.7"
-rtnetlink = "0.6"
+rtnetlink = "0.8"
 netlink-packet-core = "0.2"
 netlink-packet-utils = "0.4"
-netlink-packet-route = "0.6"
-netlink-proto = "0.5"
-netlink-sys = "0.4"
+netlink-packet-route = "0.7"
+netlink-proto = "0.7"
+netlink-sys = "0.7"
 byteorder = "1"
 nftnl = { version = "0.6", features = ["nftnl-1-1-0"] }
 mnl = { version = "0.2.0", features = ["mnl-1-0-4"] }
 which = { version = "4.0", default-features = false }
 tun = "0.5.1"
 talpid-dbus = { path = "../talpid-dbus" }
+socket2 = "0.3"
+internet-checksum = "0.2"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -71,15 +75,17 @@ tun = "0.5.1"
 
 
 [target.'cfg(windows)'.dependencies]
+byteorder = "1"
+internet-checksum = "0.2"
 widestring = "0.4"
 winreg = { version = "0.7", features = ["transactions"] }
-winapi = { version = "0.3.6", features = ["combaseapi", "handleapi", "ifdef", "libloaderapi", "netioapi", "stringapiset", "synchapi", "winbase", "winerror", "winuser"] }
+winapi = { version = "0.3.6", features = ["combaseapi", "handleapi", "ifdef", "libloaderapi", "netioapi", "psapi", "stringapiset", "synchapi", "winbase", "winioctl", "winuser"] }
 socket2 = "0.3"
-pnet_packet = "0.26"
 talpid-platform-metadata = { path = "../talpid-platform-metadata" }
+memoffset = "0.6"
 
 [build-dependencies]
-tonic-build = { version = "0.3", default-features = false, features = ["transport", "prost"] }
+tonic-build = { version = "0.5", default-features = false, features = ["transport", "prost"] }
 
 
 [dev-dependencies]

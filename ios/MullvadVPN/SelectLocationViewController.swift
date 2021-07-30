@@ -9,33 +9,19 @@
 import UIKit
 import Logging
 
-protocol SelectLocationViewControllerDelegate: class {
+protocol SelectLocationViewControllerDelegate: AnyObject {
     func selectLocationViewController(_ controller: SelectLocationViewController, didSelectRelayLocation relayLocation: RelayLocation)
 }
 
 class SelectLocationViewController: UIViewController, UITableViewDelegate {
 
-    private enum ReuseIdentifiers: String {
-        case cell
-        case header
-    }
+    static let cellReuseIdentifier = "Cell"
 
-    private lazy var tableView: UITableView = {
-        let tableView = UITableView(frame: view.bounds, style: .plain)
-        tableView.translatesAutoresizingMaskIntoConstraints = true
-        tableView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        tableView.backgroundColor = .clear
-        tableView.separatorColor = .secondaryColor
-        tableView.separatorInset = .zero
-        tableView.estimatedRowHeight = 53
-        tableView.estimatedSectionHeaderHeight = 109
-        tableView.indicatorStyle = .white
+    private var tableView: UITableView?
 
-        tableView.register(SelectLocationHeaderView.self, forHeaderFooterViewReuseIdentifier: ReuseIdentifiers.header.rawValue)
-        tableView.register(SelectLocationCell.self, forCellReuseIdentifier: ReuseIdentifiers.cell.rawValue)
-
-        return tableView
-    }()
+    private let tableHeaderFooterView = SelectLocationHeaderView()
+    private var tableHeaderFooterViewTopConstraints: [NSLayoutConstraint] = []
+    private var tableHeaderFooterViewBottomConstraints: [NSLayoutConstraint] = []
 
     private let logger = Logger(label: "SelectLocationController")
     private var dataSource: LocationDataSource?
@@ -43,6 +29,12 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
     private var setRelayLocationOnViewDidLoad: RelayLocation?
     private var setScrollPositionOnViewDidLoad: UITableView.ScrollPosition = .none
     private var isViewAppeared = false
+
+    private var showHeaderViewAtTheBottom = false {
+        didSet {
+            setTableHeaderFooterConstraints()
+        }
+    }
 
     weak var delegate: SelectLocationViewControllerDelegate?
     var scrollToSelectedRelayOnViewWillAppear = true
@@ -60,21 +52,39 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        navigationItem.largeTitleDisplayMode = .never
+        navigationItem.title = NSLocalizedString("NAVIGATION_TITLE", tableName: "SelectLocation", comment: "Navigation title")
+
+        let tableView = UITableView(frame: view.bounds, style: .plain)
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        tableView.backgroundColor = .clear
+        tableView.separatorColor = .secondaryColor
+        tableView.separatorInset = .zero
+        tableView.estimatedRowHeight = 53
+        tableView.indicatorStyle = .white
+
+        tableView.register(SelectLocationCell.self, forCellReuseIdentifier: Self.cellReuseIdentifier)
+
+        self.tableView = tableView
+
+        view.accessibilityElements = [tableHeaderFooterView, tableView]
         view.backgroundColor = .secondaryColor
         view.addSubview(tableView)
 
+        tableHeaderFooterView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(tableHeaderFooterView)
+
         dataSource = LocationDataSource(
-            tableView: self.tableView,
+            tableView: tableView,
             cellProvider: { [weak self] (tableView, indexPath, item) -> UITableViewCell? in
                 guard let self = self else { return nil }
 
-                let cell = tableView.dequeueReusableCell(
-                    withIdentifier: ReuseIdentifiers.cell.rawValue, for: indexPath) as! SelectLocationCell
+                let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellReuseIdentifier, for: indexPath)
+                    as! SelectLocationCell
 
                 cell.accessibilityIdentifier = item.location.stringRepresentation
                 cell.isDisabled = !item.isActive
                 cell.locationLabel.text = item.displayName
-                cell.statusIndicator.isActive = item.isActive
                 cell.showsCollapseControl = item.isCollapsible
                 cell.isExpanded = item.showsChildren
                 cell.didCollapseHandler = { [weak self] (cell) in
@@ -86,6 +96,25 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
 
         tableView.delegate = self
         tableView.dataSource = dataSource
+
+        tableHeaderFooterViewTopConstraints = [
+            tableHeaderFooterView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.topAnchor.constraint(equalTo: tableHeaderFooterView.bottomAnchor),
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ]
+        tableHeaderFooterViewBottomConstraints = [
+            tableHeaderFooterView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.bottomAnchor.constraint(equalTo: tableHeaderFooterView.topAnchor)
+        ]
+
+        NSLayoutConstraint.activate([
+            tableHeaderFooterView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableHeaderFooterView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+        setTableHeaderFooterConstraints()
 
         if let setCachedRelaysOnViewDidLoad = self.setCachedRelaysOnViewDidLoad {
             dataSource?.setRelays(setCachedRelaysOnViewDidLoad.relays)
@@ -104,8 +133,12 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
+        // Show header view at the bottom when controller is presented inline and show header view
+        // at the top of the view when controller is presented modally.
+        showHeaderViewAtTheBottom = self.presentingViewController == nil
+
         if let indexPath = dataSource?.indexPathForSelectedRelay(), scrollToSelectedRelayOnViewWillAppear, !isViewAppeared {
-            self.tableView.scrollToRow(at: indexPath, at: .middle, animated: false)
+            self.tableView?.scrollToRow(at: indexPath, at: .middle, animated: false)
         }
     }
 
@@ -114,7 +147,7 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
 
         isViewAppeared = true
 
-        tableView.flashScrollIndicators()
+        tableView?.flashScrollIndicators()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -128,9 +161,15 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
 
         coordinator.animate { (context) in
             if let indexPath = self.dataSource?.indexPathForSelectedRelay() {
-                self.tableView.scrollToRow(at: indexPath, at: .middle, animated: false)
+                self.tableView?.scrollToRow(at: indexPath, at: .middle, animated: false)
             }
         }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        updateTableHeaderTopLayoutMargin()
     }
 
     // MARK: - UITableViewDelegate
@@ -162,20 +201,6 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
         self.delegate?.selectLocationViewController(self, didSelectRelayLocation: item.location)
     }
 
-    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
-        assert(section == 0)
-
-        let view = tableView.dequeueReusableHeaderFooterView(withIdentifier: ReuseIdentifiers.header.rawValue) as! SelectLocationHeaderView
-
-        // When contained within the navigation controller, we want the distance between the navigation title
-        // and the table header label to be exactly 24pt.
-        if let navigationBar = navigationController?.navigationBar as? CustomNavigationBar {
-            view.topLayoutMarginAdjustmentForNavigationBarTitle = navigationBar.titleLabelBottomInset
-        }
-
-        return view
-    }
-
     // MARK: - Public
 
     func setCachedRelays(_ cachedRelays: CachedRelays) {
@@ -204,11 +229,36 @@ class SelectLocationViewController: UIViewController, UITableViewDelegate {
     // MARK: - Collapsible cells
 
     private func collapseCell(_ cell: SelectLocationCell) {
-        guard let cellIndexPath = tableView.indexPath(for: cell),
+        guard let cellIndexPath = tableView?.indexPath(for: cell),
               let dataSource = dataSource, let location = dataSource.relayLocation(for: cellIndexPath) else {
             return
         }
 
         dataSource.toggleChildren(location, animated: true)
+    }
+
+    // MARK: - Private
+
+    private func updateTableHeaderTopLayoutMargin() {
+        // When contained within the navigation controller, we want the distance between the navigation title
+        // and the table header label to be exactly 24pt.
+        if let navigationBar = navigationController?.navigationBar as? CustomNavigationBar, !showHeaderViewAtTheBottom {
+            tableHeaderFooterView.topLayoutMarginAdjustmentForNavigationBarTitle = navigationBar.titleLabelBottomInset
+        } else {
+            tableHeaderFooterView.topLayoutMarginAdjustmentForNavigationBarTitle = 0
+        }
+    }
+
+    private func setTableHeaderFooterConstraints() {
+        if showHeaderViewAtTheBottom {
+            NSLayoutConstraint.deactivate(
+                tableHeaderFooterViewTopConstraints)
+            NSLayoutConstraint.activate(tableHeaderFooterViewBottomConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(
+                tableHeaderFooterViewBottomConstraints)
+            NSLayoutConstraint.activate(tableHeaderFooterViewTopConstraints)
+        }
+        view.layoutIfNeeded()
     }
 }

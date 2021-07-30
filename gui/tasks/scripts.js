@@ -21,6 +21,7 @@ function makeWatchCompiler(onFirstSuccess, onSuccess) {
         makeBrowserifyRenderer(true),
         makeBrowserifyPreload(true),
       )(async () => {
+        const wasFirstBuild = firstBuild;
         if (firstBuild) {
           firstBuild = false;
           onFirstSuccess();
@@ -36,7 +37,7 @@ function makeWatchCompiler(onFirstSuccess, onSuccess) {
         ) {
           lastBundle = bundle;
           lastPreloadBundle = preloadBundle;
-          onSuccess();
+          !wasFirstBuild && onSuccess();
         }
       }),
     );
@@ -81,6 +82,7 @@ function makeBrowserifyPreload(debug) {
     let stream = browserify({
       entries: './build/src/renderer/preload.js',
       debug,
+      detectGlobals: false,
     })
       .exclude('electron')
       .bundle()

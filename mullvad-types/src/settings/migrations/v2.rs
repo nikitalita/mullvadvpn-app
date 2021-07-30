@@ -160,7 +160,7 @@ mod test {
       "enable_ipv6": false
     }
   },
-  "settings_version": 3
+  "settings_version": 4
 }
 "#;
 

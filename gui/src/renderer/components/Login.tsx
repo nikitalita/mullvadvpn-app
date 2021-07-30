@@ -1,7 +1,6 @@
 import React, { useCallback } from 'react';
 import { sprintf } from 'sprintf-js';
 import { colors } from '../../config.json';
-import consumePromise from '../../shared/promise';
 import { messages } from '../../shared/gettext';
 import { formatAccountToken } from '../lib/account';
 import Accordion from './Accordion';
@@ -36,13 +35,13 @@ import { AriaControlGroup, AriaControlled, AriaControls } from './AriaGroup';
 
 interface IProps {
   accountToken?: AccountToken;
-  accountHistory: AccountToken[];
+  accountHistory?: AccountToken;
   loginState: LoginState;
   openExternalLink: (type: string) => void;
   login: (accountToken: AccountToken) => void;
   resetLoginError: () => void;
   updateAccountToken: (accountToken: AccountToken) => void;
-  removeAccountTokenFromHistory: (accountToken: AccountToken) => Promise<void>;
+  clearAccountHistory: () => Promise<void>;
   createNewAccount: () => void;
 }
 
@@ -82,7 +81,7 @@ export default class Login extends React.Component<IProps, IState> {
   }
 
   public render() {
-    const showFooter = this.shouldShowFooter();
+    const showFooter = this.allowInteraction();
 
     return (
       <Layout>
@@ -208,14 +207,7 @@ export default class Login extends React.Component<IProps, IState> {
   }
 
   private shouldShowAccountHistory() {
-    return this.allowInteraction() && this.state.isActive && this.props.accountHistory.length > 0;
-  }
-
-  private shouldShowFooter() {
-    return (
-      (this.props.loginState.type === 'none' || this.props.loginState.type === 'failed') &&
-      !this.shouldShowAccountHistory()
-    );
+    return this.allowInteraction() && this.props.accountHistory !== undefined;
   }
 
   private onSelectAccountFromHistory = (accountToken: string) => {
@@ -223,13 +215,13 @@ export default class Login extends React.Component<IProps, IState> {
     this.props.login(accountToken);
   };
 
-  private onRemoveAccountFromHistory = (accountToken: string) => {
-    consumePromise(this.removeAccountFromHistory(accountToken));
+  private onClearAccountHistory = () => {
+    void this.clearAccountHistory();
   };
 
-  private async removeAccountFromHistory(accountToken: AccountToken) {
+  private async clearAccountHistory() {
     try {
-      await this.props.removeAccountTokenFromHistory(accountToken);
+      await this.props.clearAccountHistory();
 
       // TODO: Remove account from memory
     } catch (error) {
@@ -274,8 +266,7 @@ export default class Login extends React.Component<IProps, IState> {
               aria-label={
                 // TRANSLATORS: This is used by screenreaders to communicate the login button.
                 messages.pgettext('accessibility', 'Login')
-              }
-              onClick={this.onSubmit}>
+              }>
               <StyledInputSubmitIcon
                 visible={this.props.loginState.type !== 'logging in'}
                 source="icon-arrow"
@@ -288,9 +279,9 @@ export default class Login extends React.Component<IProps, IState> {
           <Accordion expanded={this.shouldShowAccountHistory()}>
             <StyledAccountDropdownContainer>
               <AccountDropdown
-                items={this.props.accountHistory.slice().reverse()}
+                item={this.props.accountHistory}
                 onSelect={this.onSelectAccountFromHistory}
-                onRemove={this.onRemoveAccountFromHistory}
+                onRemove={this.onClearAccountHistory}
               />
             </StyledAccountDropdownContainer>
           </Accordion>
@@ -316,28 +307,24 @@ export default class Login extends React.Component<IProps, IState> {
 }
 
 interface IAccountDropdownProps {
-  items: AccountToken[];
+  item?: AccountToken;
   onSelect: (value: AccountToken) => void;
   onRemove: (value: AccountToken) => void;
 }
 
 function AccountDropdown(props: IAccountDropdownProps) {
-  const uniqueItems = [...new Set(props.items)];
+  const token = props.item;
+  if (!token) {
+    return null;
+  }
+  const label = formatAccountToken(token);
   return (
-    <>
-      {uniqueItems.map((token) => {
-        const label = formatAccountToken(token);
-        return (
-          <AccountDropdownItem
-            key={token}
-            value={token}
-            label={label}
-            onSelect={props.onSelect}
-            onRemove={props.onRemove}
-          />
-        );
-      })}
-    </>
+    <AccountDropdownItem
+      value={token}
+      label={label}
+      onSelect={props.onSelect}
+      onRemove={props.onRemove}
+    />
   );
 }
 
@@ -353,9 +340,14 @@ function AccountDropdownItem(props: IAccountDropdownItemProps) {
     props.onSelect(props.value);
   }, [props.onSelect, props.value]);
 
-  const handleRemove = useCallback(() => {
-    props.onRemove(props.value);
-  }, [props.onRemove, props.value]);
+  const handleRemove = useCallback(
+    (event) => {
+      // Prevent login form from submitting
+      event.preventDefault();
+      props.onRemove(props.value);
+    },
+    [props.onRemove, props.value],
+  );
 
   return (
     <>

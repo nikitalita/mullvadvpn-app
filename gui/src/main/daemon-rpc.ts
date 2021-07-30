@@ -54,7 +54,6 @@ import log from '../shared/logging';
 import * as managementInterface from './management_interface/management_interface_grpc_pb';
 import * as grpcTypes from './management_interface/management_interface_pb';
 import { CommunicationError, InvalidAccountError } from './errors';
-import consumePromise from '../shared/promise';
 
 const NETWORK_CALL_TIMEOUT = 10000;
 const CHANNEL_STATE_TIMEOUT = 1000 * 60 * 60;
@@ -418,13 +417,13 @@ export class DaemonRpc {
     }
   }
 
-  public async getAccountHistory(): Promise<AccountToken[]> {
+  public async getAccountHistory(): Promise<AccountToken | undefined> {
     const response = await this.callEmpty<grpcTypes.AccountHistory>(this.client.getAccountHistory);
-    return response.toObject().tokenList;
+    return response.getToken()?.getValue();
   }
 
-  public async removeAccountFromHistory(accountToken: AccountToken): Promise<void> {
-    await this.callString(this.client.removeAccountFromHistory, accountToken);
+  public async clearAccountHistory(): Promise<void> {
+    await this.callEmpty(this.client.clearAccountHistory);
   }
 
   public async getCurrentVersion(): Promise<string> {
@@ -447,8 +446,21 @@ export class DaemonRpc {
 
   public async setDnsOptions(dns: IDnsOptions): Promise<void> {
     const dnsOptions = new grpcTypes.DnsOptions();
-    dnsOptions.setCustom(dns.custom);
-    dnsOptions.setAddressesList(dns.addresses);
+
+    const defaultOptions = new grpcTypes.DefaultDnsOptions();
+    defaultOptions.setBlockAds(dns.defaultOptions.blockAds);
+    defaultOptions.setBlockTrackers(dns.defaultOptions.blockTrackers);
+    dnsOptions.setDefaultOptions(defaultOptions);
+
+    const customOptions = new grpcTypes.CustomDnsOptions();
+    customOptions.setAddressesList(dns.customOptions.addresses);
+    dnsOptions.setCustomOptions(customOptions);
+
+    if (dns.state === 'custom') {
+      dnsOptions.setState(grpcTypes.DnsOptions.DnsState.CUSTOM);
+    } else {
+      dnsOptions.setState(grpcTypes.DnsOptions.DnsState.DEFAULT);
+    }
 
     await this.call<grpcTypes.DnsOptions, Empty>(this.client.setDnsOptions, dnsOptions);
   }
@@ -461,6 +473,18 @@ export class DaemonRpc {
   public async getVersionInfo(): Promise<IAppVersionInfo> {
     const response = await this.callEmpty<grpcTypes.AppVersionInfo>(this.client.getVersionInfo);
     return response.toObject();
+  }
+
+  public async addSplitTunnelingApplication(path: string): Promise<void> {
+    await this.callString(this.client.addSplitTunnelApp, path);
+  }
+
+  public async removeSplitTunnelingApplication(path: string): Promise<void> {
+    await this.callString(this.client.removeSplitTunnelApp, path);
+  }
+
+  public async setSplitTunnelingState(enabled: boolean): Promise<void> {
+    await this.callBool(this.client.setSplitTunnelState, enabled);
   }
 
   private subscriptionId(): number {
@@ -560,11 +584,9 @@ export class DaemonRpc {
         this.connectionObservers.forEach((observer) => observer.onClose());
         this.isConnected = false;
         // Try and reconnect in case
-        consumePromise(
-          this.connect().catch((error) => {
-            log.error(`Failed to reconnect - ${error}`);
-          }),
-        );
+        void this.connect().catch((error) => {
+          log.error(`Failed to reconnect - ${error}`);
+        });
         this.setChannelCallback(currentState);
       } else if (!wasConnected && currentState === grpc.connectivityState.READY) {
         this.isConnected = true;
@@ -607,11 +629,9 @@ export class DaemonRpc {
         this.isConnected = false;
       }
       if (!this.isConnected) {
-        consumePromise(
-          this.connect().catch((error) => {
-            log.error(`Failed to reconnect - ${error}`);
-          }),
-        );
+        void this.connect().catch((error) => {
+          log.error(`Failed to reconnect - ${error}`);
+        });
       }
     }, 3000);
   }
@@ -788,6 +808,8 @@ function convertFromTunnelStateErrorCause(
       };
       return { reason: 'tunnel_parameter_error', details: parameterErrorMap[state.parameterError] };
     }
+    case grpcTypes.ErrorState.Cause.SPLIT_TUNNEL_ERROR:
+      return { reason: 'split_tunnel_error' };
     case grpcTypes.ErrorState.Cause.VPN_PERMISSION_DENIED:
       // VPN_PERMISSION_DENIED is only ever created on Android
       throw invalidErrorStateCause;
@@ -853,12 +875,14 @@ function convertFromSettings(settings: grpcTypes.Settings): ISettings | undefine
   const relaySettings = convertFromRelaySettings(settings.getRelaySettings())!;
   const bridgeSettings = convertFromBridgeSettings(settingsObject.bridgeSettings!);
   const tunnelOptions = convertFromTunnelOptions(settingsObject.tunnelOptions!);
+  const splitTunnel = settingsObject.splitTunnel ?? { enableExclusions: false, appsList: [] };
   return {
     ...settings.toObject(),
     bridgeState,
     relaySettings,
     bridgeSettings,
     tunnelOptions,
+    splitTunnel,
   };
 }
 
@@ -1029,8 +1053,17 @@ function convertFromTunnelOptions(tunnelOptions: grpcTypes.TunnelOptions.AsObjec
       enableIpv6: tunnelOptions.generic!.enableIpv6,
     },
     dns: {
-      custom: tunnelOptions.dnsOptions?.custom ?? false,
-      addresses: tunnelOptions.dnsOptions?.addressesList ?? [],
+      state:
+        tunnelOptions.dnsOptions?.state === grpcTypes.DnsOptions.DnsState.CUSTOM
+          ? 'custom'
+          : 'default',
+      defaultOptions: {
+        blockAds: tunnelOptions.dnsOptions?.defaultOptions?.blockAds ?? false,
+        blockTrackers: tunnelOptions.dnsOptions?.defaultOptions?.blockTrackers ?? false,
+      },
+      customOptions: {
+        addresses: tunnelOptions.dnsOptions?.customOptions?.addressesList ?? [],
+      },
     },
   };
 }

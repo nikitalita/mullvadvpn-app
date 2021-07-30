@@ -1,5 +1,6 @@
 export interface IAccountData {
   expiry: string;
+  previousExpiry?: string;
 }
 export type AccountToken = string;
 export type Ip = string;
@@ -33,7 +34,12 @@ export type TunnelParameterError =
 
 export type ErrorStateCause =
   | {
-      reason: 'ipv6_unavailable' | 'set_dns_error' | 'start_tunnel_error' | 'is_offline';
+      reason:
+        | 'ipv6_unavailable'
+        | 'set_dns_error'
+        | 'start_tunnel_error'
+        | 'is_offline'
+        | 'split_tunnel_error';
     }
   | { reason: 'set_firewall_policy_error'; details: FirewallPolicyError }
   | { reason: 'tunnel_parameter_error'; details: TunnelParameterError }
@@ -261,8 +267,14 @@ export interface ITunnelOptions {
 }
 
 export interface IDnsOptions {
-  custom: boolean;
-  addresses: string[];
+  state: 'custom' | 'default';
+  customOptions: {
+    addresses: string[];
+  };
+  defaultOptions: {
+    blockAds: boolean;
+    blockTrackers: boolean;
+  };
 }
 
 export type ProxySettings = ILocalProxySettings | IRemoteProxySettings | IShadowsocksProxySettings;
@@ -304,6 +316,7 @@ export interface ISettings {
   tunnelOptions: ITunnelOptions;
   bridgeSettings: BridgeSettings;
   bridgeState: BridgeState;
+  splitTunnel: SplitTunnelSettings;
 }
 
 export type KeygenEvent = INewWireguardKey | KeygenFailure;
@@ -319,6 +332,11 @@ export interface IWireguardPublicKey {
 }
 
 export type BridgeState = 'auto' | 'on' | 'off';
+
+export type SplitTunnelSettings = {
+  enableExclusions: boolean;
+  appsList: string[];
+};
 
 export interface IBridgeConstraints {
   location: Constraint<RelayLocation>;

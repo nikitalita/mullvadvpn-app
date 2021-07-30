@@ -7,6 +7,7 @@
 //
 
 import UIKit
+import Logging
 
 class AutomaticKeyboardResponder {
     weak var targetView: UIView?
@@ -15,6 +16,7 @@ class AutomaticKeyboardResponder {
     private var showsKeyboard = false
     private var lastKeyboardRect: CGRect?
 
+    private let logger = Logger(label: "AutomaticKeyboardResponder")
     private var presentationFrameObserver: NSKeyValueObservation?
 
     init<T: UIView>(targetView: T, handler: @escaping (T, CGFloat) -> Void) {
@@ -65,16 +67,17 @@ class AutomaticKeyboardResponder {
     }
 
     private func addPresentationControllerObserver() {
+        guard isFormSheetPresentation else { return }
+
         // Presentation controller follows the keyboard on iPad.
         // Install the observer to listen for the container view frame and adjust the target view
         // accordingly.
-        guard let containerView = parentViewController?.presentationController?.containerView, isFormSheetPresentation else { return }
-
-        let containingView = containerView.subviews.first { (subview) -> Bool in
-            return targetView?.isDescendant(of: subview) ?? false
+        guard let containerView = presentationContainerView else {
+            logger.warning("Cannot determine the container view in form sheet presentation.")
+            return
         }
 
-        presentationFrameObserver = containingView?.observe(\.frame, options: [.new], changeHandler: { [weak self] (containingView, change) in
+        presentationFrameObserver = containerView.observe(\.frame, options: [.new], changeHandler: { [weak self] (containingView, change) in
             guard let self = self, let keyboardFrameValue = self.lastKeyboardRect else { return }
 
             self.adjustContentInsets(keyboardRect: keyboardFrameValue)
@@ -85,17 +88,47 @@ class AutomaticKeyboardResponder {
     private var parentViewController: UIViewController? {
         var responder: UIResponder? = targetView
         let iterator = AnyIterator { () -> UIResponder? in
-            let next = responder?.next
-            responder = next
-            return next
+            responder = responder?.next
+            return responder
         }
 
         return iterator.first { $0 is UIViewController } as? UIViewController
     }
 
+    /// Returns the presentation container view that's moved along with the keyboard on iPad
+    private var presentationContainerView: UIView? {
+        var currentView = parentViewController?.view
+        let iterator = AnyIterator { () -> UIView? in
+            currentView = currentView?.superview
+            return currentView
+        }
+
+        // Find the container view that private `_UIFormSheetPresentationController` moves
+        // along with the keyboard.
+        return iterator.first { (view) -> Bool in
+            return view.description.starts(with: "<UIDropShadowView")
+        }
+    }
+
     private var isFormSheetPresentation: Bool {
-        return UIDevice.current.userInterfaceIdiom == .pad &&
-            parentViewController?.modalPresentationStyle == .formSheet
+        // Form sheet is only supported on iPad
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return false }
+
+        // Find the parent controller holding the view
+        guard let parent = parentViewController else { return false }
+
+        // Determine presentation style within the context
+        let presentationStyle: UIModalPresentationStyle
+
+        // Use the presentation style of a presented controller when parent controller is being presented as a child of
+        // other modal controller.
+        if let presented = parent.presentingViewController?.presentedViewController {
+            presentationStyle = presented.modalPresentationStyle
+        } else {
+            presentationStyle = parent.modalPresentationStyle
+        }
+
+        return presentationStyle == .formSheet
     }
 
     private func adjustContentInsets(keyboardRect: CGRect) {

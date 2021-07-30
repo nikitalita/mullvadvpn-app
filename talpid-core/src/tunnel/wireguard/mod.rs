@@ -8,6 +8,8 @@ use futures::future::abortable;
 use lazy_static::lazy_static;
 #[cfg(target_os = "linux")]
 use std::env;
+#[cfg(windows)]
+use std::io;
 use std::{
     collections::HashSet,
     net::SocketAddr,
@@ -54,22 +56,42 @@ pub enum Error {
     #[error(display = "Failed obtain local address for the UDP socket in Udp2Tcp")]
     GetLocalUdpAddress(#[error(source)] std::io::Error),
 
-    /// Failed to setup connectivity monitor
+    /// Failed to set up connectivity monitor
     #[error(display = "Connectivity monitor failed")]
     ConnectivityMonitorError(#[error(source)] connectivity_check::Error),
+
+    /// Failed to set up IP interfaces.
+    #[cfg(windows)]
+    #[error(display = "Failed while waiting on IP interfaces")]
+    IpInterfacesError(#[error(source)] io::Error),
+
+    /// Failed to set IP addresses on WireGuard interface
+    #[cfg(target_os = "windows")]
+    #[error(display = "Failed to set IP addresses on WireGuard interface")]
+    SetIpAddressesError,
 }
 
 
 /// Spawns and monitors a wireguard tunnel
 pub struct WireguardMonitor {
+    runtime: tokio::runtime::Handle,
     /// Tunnel implementation
     tunnel: Arc<Mutex<Option<Box<dyn Tunnel>>>>,
     /// Callback to signal tunnel events
-    event_callback: Box<dyn Fn(TunnelEvent) + Send + Sync + 'static>,
+    event_callback: Box<
+        dyn (Fn(TunnelEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
+            + Send
+            + Sync
+            + 'static,
+    >,
     close_msg_sender: mpsc::Sender<CloseMsg>,
     close_msg_receiver: mpsc::Receiver<CloseMsg>,
+    #[cfg(target_os = "windows")]
+    stop_setup_tx: Option<futures::channel::oneshot::Sender<()>>,
     pinger_stop_sender: mpsc::Sender<()>,
     _tcp_proxies: Vec<TcpProxy>,
+    #[cfg(target_os = "windows")]
+    _callback_handle: Option<crate::winnet::WinNetCallbackHandle>,
 }
 
 #[cfg(target_os = "linux")]
@@ -101,11 +123,11 @@ impl TcpProxy {
             .block_on(Udp2Tcp::new(
                 listen_addr,
                 endpoint,
-                Some(&TcpOptions {
+                TcpOptions {
                     #[cfg(target_os = "linux")]
                     fwmark: Some(crate::linux::TUNNEL_FW_MARK),
                     ..TcpOptions::default()
-                }),
+                },
             ))
             .map_err(Error::Udp2TcpError)?;
 
@@ -135,7 +157,13 @@ impl Drop for TcpProxy {
 
 impl WireguardMonitor {
     /// Starts a WireGuard tunnel with the given config
-    pub fn start<F: Fn(TunnelEvent) + Send + Sync + Clone + 'static>(
+    pub fn start<
+        F: (Fn(TunnelEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+    >(
         runtime: tokio::runtime::Handle,
         mut config: Config,
         log_path: Option<&Path>,
@@ -158,47 +186,111 @@ impl WireguardMonitor {
 
         let tunnel = Self::open_tunnel(&config, log_path, tun_provider, route_manager)?;
         let iface_name = tunnel.get_interface_name().to_string();
-
-        #[cfg(target_os = "linux")]
-        route_manager
-            .create_routing_rules(config.enable_ipv6)
-            .map_err(Error::SetupRoutingError)?;
-
-        route_manager
-            .add_routes(Self::get_routes(&iface_name, &config))
-            .map_err(Error::SetupRoutingError)?;
+        #[cfg(windows)]
+        let iface_luid = tunnel.get_interface_luid();
 
         #[cfg(target_os = "windows")]
-        route_manager
-            .add_default_route_callback(Some(WgGoTunnel::default_route_changed_callback), ());
+        let callback_handle = route_manager
+            .add_default_route_callback(Some(WgGoTunnel::default_route_changed_callback), ())
+            .ok();
+        #[cfg(target_os = "windows")]
+        if callback_handle.is_none() {
+            log::warn!("Failed to register default route callback");
+        }
 
         let event_callback = Box::new(on_event.clone());
         let (close_msg_sender, close_msg_receiver) = mpsc::channel();
         let (pinger_tx, pinger_rx) = mpsc::channel();
+        #[cfg(target_os = "windows")]
+        let (stop_setup_tx, stop_setup_rx) = futures::channel::oneshot::channel();
         let monitor = WireguardMonitor {
+            runtime: runtime.clone(),
             tunnel: Arc::new(Mutex::new(Some(tunnel))),
             event_callback,
             close_msg_sender,
             close_msg_receiver,
+            #[cfg(target_os = "windows")]
+            stop_setup_tx: Some(stop_setup_tx),
             pinger_stop_sender: pinger_tx,
             _tcp_proxies: tcp_proxies,
+            #[cfg(target_os = "windows")]
+            _callback_handle: callback_handle,
         };
 
-        let metadata = Self::tunnel_metadata(&iface_name, &config);
         let gateway = config.ipv4_gateway;
         let close_sender = monitor.close_msg_sender.clone();
         let mut connectivity_monitor = connectivity_check::ConnectivityMonitor::new(
             gateway,
-            iface_name.to_string(),
+            iface_name.clone(),
             Arc::downgrade(&monitor.tunnel),
             pinger_rx,
         )
         .map_err(Error::ConnectivityMonitorError)?;
 
+        let route_handle = route_manager.handle().map_err(Error::SetupRoutingError)?;
+
+        let metadata = Self::tunnel_metadata(&iface_name, &config);
+
         std::thread::spawn(move || {
+            runtime.block_on((on_event)(TunnelEvent::InterfaceUp(metadata.clone())));
+
+            #[cfg(windows)]
+            {
+                let iface_close_sender = close_sender.clone();
+                let enable_ipv6 = config.ipv6_gateway.is_some();
+
+                let result = runtime.block_on(async move {
+                    use futures::future::FutureExt;
+                    use winapi::shared::ifdef::NET_LUID;
+                    let luid = NET_LUID { Value: iface_luid };
+                    let setup_future = super::windows::wait_for_interfaces(luid, true, enable_ipv6);
+
+                    futures::select! {
+                        result = setup_future.fuse() => {
+                            result.map_err(|error|
+                                iface_close_sender.send(CloseMsg::SetupError(
+                                    Error::IpInterfacesError(error)
+                                ))
+                                .unwrap_or(())
+                            )
+                        }
+                        _ = stop_setup_rx.fuse() => Err(()),
+                    }
+                });
+
+                if result.is_err() {
+                    return;
+                }
+            }
+
+            let setup_iface_routes = || -> Result<()> {
+                #[cfg(target_os = "windows")]
+                if !crate::winnet::add_device_ip_addresses(&iface_name, &config.tunnel.addresses) {
+                    return Err(Error::SetIpAddressesError);
+                }
+
+                runtime.block_on(async move {
+                    #[cfg(target_os = "linux")]
+                    route_handle
+                        .create_routing_rules(config.enable_ipv6)
+                        .await
+                        .map_err(Error::SetupRoutingError)?;
+
+                    route_handle
+                        .add_routes(Self::get_routes(&iface_name, &config))
+                        .await
+                        .map_err(Error::SetupRoutingError)
+                })
+            };
+
+            if let Err(error) = setup_iface_routes() {
+                let _ = close_sender.send(CloseMsg::SetupError(error));
+                return;
+            }
+
             match connectivity_monitor.establish_connectivity() {
                 Ok(true) => {
-                    (on_event)(TunnelEvent::Up(metadata));
+                    runtime.block_on((on_event)(TunnelEvent::Up(metadata)));
 
                     if let Err(error) = connectivity_monitor.run() {
                         log::error!(
@@ -289,14 +381,20 @@ impl WireguardMonitor {
         let wait_result = match self.close_msg_receiver.recv() {
             Ok(CloseMsg::PingErr) => Err(Error::TimeoutError),
             Ok(CloseMsg::Stop) => Ok(()),
+            Ok(CloseMsg::SetupError(error)) => Err(error),
             Err(_) => Ok(()),
         };
 
+        #[cfg(windows)]
+        if let Some(stop_tx) = self.stop_setup_tx.take() {
+            let _ = stop_tx.send(());
+        }
         let _ = self.pinger_stop_sender.send(());
 
         self.stop_tunnel();
 
-        (self.event_callback)(TunnelEvent::Down);
+        self.runtime
+            .block_on((self.event_callback)(TunnelEvent::Down));
         wait_result
     }
 
@@ -339,14 +437,28 @@ impl WireguardMonitor {
         }
     }
 
+    #[cfg(target_os = "windows")]
     fn get_routes(iface_name: &str, config: &Config) -> HashSet<RequiredRoute> {
-        let node = routing::Node::device(iface_name.to_string());
-        let mut routes: HashSet<RequiredRoute> = Self::get_tunnel_routes(config)
-            .map(|network| RequiredRoute::new(network, node.clone()))
-            .collect();
+        let mut routes: HashSet<RequiredRoute> = {
+            let node_v4 =
+                routing::Node::new(config.ipv4_gateway.clone().into(), iface_name.to_string());
+            let node_v6 = if let Some(ipv6_gateway) = config.ipv6_gateway.as_ref() {
+                routing::Node::new(ipv6_gateway.clone().into(), iface_name.to_string())
+            } else {
+                routing::Node::device(iface_name.to_string())
+            };
+            Self::get_tunnel_routes(config)
+                .map(|network| {
+                    if network.is_ipv4() {
+                        RequiredRoute::new(network, node_v4.clone())
+                    } else {
+                        RequiredRoute::new(network, node_v6.clone())
+                    }
+                })
+                .collect()
+        };
 
         // route endpoints with specific routes
-        #[cfg(not(target_os = "linux"))]
         for peer in config.peers.iter() {
             routes.insert(RequiredRoute::new(
                 peer.endpoint.ip().into(),
@@ -354,26 +466,57 @@ impl WireguardMonitor {
             ));
         }
 
+        routes
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_routes(iface_name: &str, config: &Config) -> HashSet<RequiredRoute> {
+        use netlink_packet_route::rtnl::constants::RT_TABLE_MAIN;
+
+        let node = routing::Node::device(iface_name.to_string());
+        let mut routes: HashSet<RequiredRoute> = Self::get_tunnel_routes(config)
+            .map(|network| {
+                if network.prefix() == 0 {
+                    RequiredRoute::new(network, node.clone())
+                } else {
+                    RequiredRoute::new(network, node.clone()).table(u32::from(RT_TABLE_MAIN))
+                }
+            })
+            .collect();
+
         // add routes for the gateway so that DNS requests can be made in the tunnel
         // using `mullvad-exclude`
-        #[cfg(target_os = "linux")]
-        {
-            use netlink_packet_route::rtnl::constants::RT_TABLE_MAIN;
+        routes.insert(
+            RequiredRoute::new(
+                ipnetwork::Ipv4Network::from(config.ipv4_gateway).into(),
+                node.clone(),
+            )
+            .table(u32::from(RT_TABLE_MAIN)),
+        );
 
+        if let Some(gateway) = config.ipv6_gateway {
             routes.insert(
-                RequiredRoute::new(
-                    ipnetwork::Ipv4Network::from(config.ipv4_gateway).into(),
-                    node.clone(),
-                )
-                .table(u32::from(RT_TABLE_MAIN)),
+                RequiredRoute::new(ipnetwork::Ipv6Network::from(gateway).into(), node.clone())
+                    .table(u32::from(RT_TABLE_MAIN)),
             );
+        }
 
-            if let Some(gateway) = config.ipv6_gateway {
-                routes.insert(
-                    RequiredRoute::new(ipnetwork::Ipv6Network::from(gateway).into(), node.clone())
-                        .table(u32::from(RT_TABLE_MAIN)),
-                );
-            }
+        routes
+    }
+
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    fn get_routes(iface_name: &str, config: &Config) -> HashSet<RequiredRoute> {
+        let node = routing::Node::device(iface_name.to_string());
+        let mut routes: HashSet<RequiredRoute> = Self::get_tunnel_routes(config)
+            .map(|network| RequiredRoute::new(network, node.clone()))
+            .collect();
+
+        // route endpoints with specific routes
+        for peer in config.peers.iter() {
+            routes.insert(RequiredRoute::new(
+                peer.endpoint.ip().into(),
+                routing::NetNode::DefaultNode,
+            ));
         }
 
         routes
@@ -392,6 +535,7 @@ impl WireguardMonitor {
 enum CloseMsg {
     Stop,
     PingErr,
+    SetupError(Error),
 }
 
 /// Close handle for a WireGuard tunnel.
@@ -411,6 +555,8 @@ impl CloseHandle {
 
 pub(crate) trait Tunnel: Send {
     fn get_interface_name(&self) -> String;
+    #[cfg(target_os = "windows")]
+    fn get_interface_luid(&self) -> u64;
     fn stop(self: Box<Self>) -> std::result::Result<(), TunnelError>;
     fn get_tunnel_stats(&self) -> std::result::Result<stats::Stats, TunnelError>;
     #[cfg(target_os = "linux")]
@@ -474,11 +620,6 @@ pub enum TunnelError {
     #[cfg(target_os = "windows")]
     #[error(display = "Failed to convert adapter alias")]
     InvalidAlias,
-
-    /// Failed to set ip addresses on tunnel interface.
-    #[cfg(target_os = "windows")]
-    #[error(display = "Failed to set IP addresses on WireGuard interface")]
-    SetIpAddressesError,
 
     /// Failure to set up logging
     #[error(display = "Failed to set up logging")]

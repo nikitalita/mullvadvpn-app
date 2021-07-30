@@ -1,11 +1,15 @@
 import React, { useCallback } from 'react';
 import { useSelector } from 'react-redux';
-import { useHistory } from 'react-router';
 import styled from 'styled-components';
 import { colors } from '../../config.json';
+import { TunnelState } from '../../shared/daemon-rpc-types';
 import { messages } from '../../shared/gettext';
+import { useHistory } from '../lib/history';
 import { IReduxState } from '../redux/store';
+import { FocusFallback } from './Focus';
+import { sourceSansPro } from './common-styles';
 import ImageView from './ImageView';
+import { RoutePath } from '../lib/routes';
 
 export enum HeaderBarStyle {
   default = 'default',
@@ -28,7 +32,7 @@ interface IHeaderBarContainerProps {
 
 const HeaderBarContainer = styled.header({}, (props: IHeaderBarContainerProps) => ({
   padding: '12px 16px',
-  paddingTop: window.platform === 'darwin' && !props.unpinnedWindow ? '24px' : '12px',
+  paddingTop: window.env.platform === 'darwin' && !props.unpinnedWindow ? '24px' : '12px',
   backgroundColor: headerBarStyleColorMap[props.barStyle ?? HeaderBarStyle.default],
 }));
 
@@ -68,9 +72,8 @@ const BrandContainer = styled.div({
 });
 
 const Title = styled.span({
-  fontFamily: 'DINPro',
-  fontSize: '24px',
-  fontWeight: 900,
+  ...sourceSansPro,
+  fontSize: '26px',
   lineHeight: '30px',
   color: colors.white80,
   marginLeft: '9px',
@@ -84,7 +87,7 @@ export function Brand(props: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <BrandContainer {...props}>
       <Logo width={44} height={44} source="logo-icon" />
-      <Title>{messages.pgettext('generic', 'MULLVAD VPN')}</Title>
+      <Title>MULLVAD VPN</Title>
     </BrandContainer>
   );
 }
@@ -101,7 +104,7 @@ export function HeaderBarSettingsButton() {
   const history = useHistory();
 
   const openSettings = useCallback(() => {
-    history.push('/settings');
+    history.show(RoutePath.settings);
   }, [history]);
 
   return (
@@ -117,4 +120,35 @@ export function HeaderBarSettingsButton() {
       />
     </HeaderBarSettingsButtonContainer>
   );
+}
+
+export function DefaultHeaderBar(props: IHeaderBarProps) {
+  return (
+    <HeaderBar {...props}>
+      <FocusFallback>
+        <Brand />
+      </FocusFallback>
+      <HeaderBarSettingsButton />
+    </HeaderBar>
+  );
+}
+
+export function calculateHeaderBarStyle(tunnelState: TunnelState): HeaderBarStyle {
+  switch (tunnelState.state) {
+    case 'disconnected':
+      return HeaderBarStyle.error;
+    case 'connecting':
+    case 'connected':
+      return HeaderBarStyle.success;
+    case 'error':
+      return !tunnelState.details.blockFailure ? HeaderBarStyle.success : HeaderBarStyle.error;
+    case 'disconnecting':
+      switch (tunnelState.details) {
+        case 'block':
+        case 'reconnect':
+          return HeaderBarStyle.success;
+        case 'nothing':
+          return HeaderBarStyle.error;
+      }
+  }
 }

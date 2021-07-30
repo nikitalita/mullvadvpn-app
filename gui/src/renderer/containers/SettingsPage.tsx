@@ -1,7 +1,8 @@
 import { connect } from 'react-redux';
-import { RouteComponentProps, withRouter } from 'react-router';
 import Settings from '../components/Settings';
 import withAppContext, { IAppContext } from '../context';
+import { IHistoryProps, withHistory } from '../lib/history';
+import { RoutePath } from '../lib/routes';
 import { IReduxState, ReduxDispatch } from '../redux/store';
 
 const mapStateToProps = (state: IReduxState, props: IAppContext) => ({
@@ -16,17 +17,18 @@ const mapStateToProps = (state: IReduxState, props: IAppContext) => ({
   suggestedIsBeta: state.version.suggestedIsBeta ?? false,
   isOffline: state.connection.isBlocked,
 });
-const mapDispatchToProps = (_dispatch: ReduxDispatch, props: RouteComponentProps & IAppContext) => {
+const mapDispatchToProps = (_dispatch: ReduxDispatch, props: IHistoryProps & IAppContext) => {
   return {
     onQuit: () => props.app.quit(),
-    onClose: () => props.history.goBack(),
-    onViewSelectLanguage: () => props.history.push('/settings/language'),
-    onViewAccount: () => props.history.push('/settings/account'),
-    onViewSupport: () => props.history.push('/settings/support'),
-    onViewPreferences: () => props.history.push('/settings/preferences'),
-    onViewAdvancedSettings: () => props.history.push('/settings/advanced'),
+    onClose: () => props.history.dismiss(),
+    onViewSelectLanguage: () => props.history.push(RoutePath.selectLanguage),
+    onViewAccount: () => props.history.push(RoutePath.accountSettings),
+    onViewSupport: () => props.history.push(RoutePath.support),
+    onViewPreferences: () => props.history.push(RoutePath.preferences),
+    onViewAdvancedSettings: () => props.history.push(RoutePath.advancedSettings),
     onExternalLink: (url: string) => props.app.openUrl(url),
+    updateAccountData: () => props.app.updateAccountData(),
   };
 };
 
-export default withAppContext(withRouter(connect(mapStateToProps, mapDispatchToProps)(Settings)));
+export default withAppContext(withHistory(connect(mapStateToProps, mapDispatchToProps)(Settings)));

@@ -1,5 +1,5 @@
 import { GetTextTranslations } from 'gettext-parser';
-import { ILinuxSplitTunnelingApplication } from './application-types';
+import { IApplication, ILinuxSplitTunnelingApplication } from './application-types';
 import {
   AccountToken,
   BridgeSettings,
@@ -40,11 +40,10 @@ export interface IRelayListPair {
 export type LaunchApplicationResult = { success: true } | { error: string };
 
 export interface IAppStateSnapshot {
-  locale: string;
   isConnected: boolean;
   autoStart: boolean;
   accountData?: IAccountData;
-  accountHistory: AccountToken[];
+  accountHistory?: AccountToken;
   tunnelState: TunnelState;
   settings: ISettings;
   location?: ILocation;
@@ -54,8 +53,7 @@ export interface IAppStateSnapshot {
   guiSettings: IGuiSettingsState;
   wireguardPublicKey?: IWireguardPublicKey;
   translations: ITranslations;
-  platform: NodeJS.Platform;
-  runningInDevelopment: boolean;
+  windowsSplitTunnelingApplications?: IApplication[];
 }
 
 // The different types of requests are:
@@ -163,10 +161,11 @@ export const ipcSchema = {
     logout: invoke<void, void>(),
     getWwwAuthToken: invoke<void, string>(),
     submitVoucher: invoke<string, VoucherResponse>(),
+    updateData: send<void>(),
   },
   accountHistory: {
-    '': notifyRenderer<AccountToken[]>(),
-    removeItem: invoke<AccountToken, void>(),
+    '': notifyRenderer<AccountToken | undefined>(),
+    clear: invoke<void, void>(),
   },
   autoStart: {
     '': notifyRenderer<boolean>(),
@@ -178,16 +177,23 @@ export const ipcSchema = {
     generateKey: invoke<void, KeygenEvent>(),
     verifyKey: invoke<void, boolean>(),
   },
-  splitTunneling: {
-    getApplications: invoke<void, ILinuxSplitTunnelingApplication[]>(),
-    launchApplication: invoke<ILinuxSplitTunnelingApplication | string, LaunchApplicationResult>(),
-  },
   problemReport: {
-    collectLogs: invoke<string[], string>(),
+    collectLogs: invoke<string | undefined, string>(),
     sendReport: invoke<{ email: string; message: string; savedReportId: string }, void>(),
     viewLog: invoke<string, string>(),
   },
   logging: {
     log: send<ILogEntry>(),
+  },
+  linuxSplitTunneling: {
+    getApplications: invoke<void, ILinuxSplitTunnelingApplication[]>(),
+    launchApplication: invoke<ILinuxSplitTunnelingApplication | string, LaunchApplicationResult>(),
+  },
+  windowsSplitTunneling: {
+    '': notifyRenderer<IApplication[]>(),
+    setState: invoke<boolean, void>(),
+    getApplications: invoke<boolean, { fromCache: boolean; applications: IApplication[] }>(),
+    addApplication: invoke<IApplication | string, void>(),
+    removeApplication: invoke<IApplication | string, void>(),
   },
 };

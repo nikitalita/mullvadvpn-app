@@ -28,9 +28,12 @@
 !define PATCH_MISSING 2
 
 # Return codes from driverlogic
-!define DL_ADAPTER_NOT_FOUND -2
-!define DL_GENERAL_ERROR -1
 !define DL_GENERAL_SUCCESS 0
+!define DL_GENERAL_ERROR 1
+!define DL_ST_DRIVER_NONE_INSTALLED 2
+!define DL_ST_DRIVER_SAME_VERSION_INSTALLED 3
+!define DL_ST_DRIVER_OLDER_VERSION_INSTALLED 4
+!define DL_ST_DRIVER_NEWER_VERSION_INSTALLED 5
 
 # Log targets
 !define LOG_INSTALL 0
@@ -54,7 +57,6 @@
 
 !define BLOCK_OUTBOUND_IPV4_FILTER_GUID "{a81c5411-0fd0-43a9-a9be-313f299de64f}"
 !define PERSISTENT_BLOCK_OUTBOUND_IPV4_FILTER_GUID "{79860c64-9a5e-48a3-b5f3-d64b41659aa5}"
-!define WINTUN_ADAPTER_GUID "{AFE43773-E1F8-4EBB-8536-576AB86AFE9A}"
 
 #
 # ExtractWintun
@@ -64,7 +66,7 @@
 !macro ExtractWintun
 
 	SetOutPath "$TEMP"
-	File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\wintun.dll"
+	File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\wintun\wintun.dll"
 	File "${BUILD_RESOURCES_DIR}\..\windows\driverlogic\bin\x64-Release\driverlogic.exe"
 
 !macroend
@@ -162,6 +164,28 @@
 !define InstallWin7Hotfix '!insertmacro "InstallWin7Hotfix"'
 
 #
+# ExtractSplitTunnelDriver
+#
+# Extract split tunnel driver and associated files into $TEMP\mullvad-split-tunnel
+#
+!macro ExtractSplitTunnelDriver
+
+	SetOutPath "$TEMP\mullvad-split-tunnel"
+
+	${If} ${AtLeastWin10}
+		File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\split-tunnel\win10\*"
+	${Else}
+		File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\split-tunnel\legacy\*"
+		File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\split-tunnel\meta\mullvad-ev.cer"
+	${EndIf}
+
+	File "${BUILD_RESOURCES_DIR}\..\windows\driverlogic\bin\x64-Release\driverlogic.exe"
+
+!macroend
+
+!define ExtractSplitTunnelDriver '!insertmacro "ExtractSplitTunnelDriver"'
+
+#
 # RemoveWintun
 #
 # Try to remove Wintun
@@ -172,7 +196,7 @@
 
 	log::Log "RemoveWintun()"
 
-	nsExec::ExecToStack '"$TEMP\driverlogic.exe" wintun delete-pool-driver ${WINTUN_POOL}'
+	nsExec::ExecToStack '"$TEMP\driverlogic.exe" wintun-delete-pool-driver ${WINTUN_POOL}'
 	Pop $0
 	Pop $1
 
@@ -208,12 +232,11 @@
 
 	log::Log "RemoveAbandonedWintunAdapter()"
 
-	nsExec::ExecToStack '"$TEMP\driverlogic.exe" remove-device-by-guid ${WINTUN_ADAPTER_GUID}'
+	nsExec::ExecToStack '"$TEMP\driverlogic.exe" wintun-delete-abandoned-device'
 	Pop $0
 	Pop $1
 
 	${If} $0 != ${DL_GENERAL_SUCCESS}
-	${AndIf} $0 != ${DL_ADAPTER_NOT_FOUND}
 		IntFmt $0 "0x%X" $0
 		StrCpy $R0 "Failed to remove network adapter: error $0"
 		log::LogWithDetails $R0 $1
@@ -259,6 +282,18 @@
 		StrCpy $R0 "Failed to install Mullvad service"
 		log::LogWithDetails $R0 $1
 
+		#
+		# NSIS documentation indicates that failure to launch the target will return
+		# the string "error" on the top of the stack ($0 after we pop).
+		#
+		# However in practice, the failure code from CreateProcess is used.
+		# And naturally, comparing to 0xC0000139 fails because... NSIS
+		#
+		${If} $0 == -1073741511
+			log::Log "Failed to launch $\"mullvad-daemon$\" (API issue)"
+			Goto InstallService_return
+		${EndIf}
+
 		Goto InstallService_return
 	${EndIf}
 
@@ -293,6 +328,162 @@
 !macroend
 
 !define InstallService '!insertmacro "InstallService"'
+
+#
+# InstallSplitTunnelDriverCert
+#
+# Install driver certificate in trusted publishers store
+#
+!macro InstallSplitTunnelDriverCert
+
+	${IfNot} ${AtLeastWin10}
+		log::Log "Adding Split Tunnel driver certificate to certificate store"
+
+		nsExec::ExecToStack '"$SYSDIR\certutil.exe" -f -addstore TrustedPublisher "$TEMP\mullvad-split-tunnel\mullvad-ev.cer"'
+		Pop $0
+		Pop $1
+
+		${If} $0 != 0
+			StrCpy $R0 "Failed to add trusted publisher certificate: error $0"
+			log::LogWithDetails $R0 $1
+		${EndIf}
+	${EndIf}
+
+!macroend
+
+!define InstallSplitTunnelDriverCert '!insertmacro "InstallSplitTunnelDriverCert"'
+
+#
+# InstallSplitTunnelDriver
+#
+# Install split tunnel driver
+#
+# Returns: 0 in $R0 on success, otherwise an error message in $R0
+#
+!macro InstallSplitTunnelDriver
+
+	log::Log "InstallSplitTunnelDriver()"
+
+	Push $0
+	Push $1
+
+	log::Log "Searching for and evaluating already installed Split Tunneling driver"
+	nsExec::ExecToStack '"$TEMP\mullvad-split-tunnel\driverlogic.exe" st-evaluate "$TEMP\mullvad-split-tunnel\mullvad-split-tunnel.inf"'
+
+	Pop $0
+	Pop $1
+
+	${If} $0 == ${DL_ST_DRIVER_NONE_INSTALLED}
+		log::Log "No currently installed Split Tunneling driver"
+		Goto InstallSplitTunnelDriver_new_install
+	${OrIf} $0 == ${DL_ST_DRIVER_SAME_VERSION_INSTALLED}
+		log::Log "Up-to-date Split Tunneling driver already installed"
+		Goto InstallSplitTunnelDriver_success
+	${OrIf} $0 == ${DL_ST_DRIVER_OLDER_VERSION_INSTALLED}
+		log::Log "An older version of the Split Tunneling driver is installed"
+		Goto InstallSplitTunnelDriver_force_install
+	${OrIf} $0 == ${DL_ST_DRIVER_NEWER_VERSION_INSTALLED}
+		log::Log "A newer version of the Split Tunneling driver is installed"
+		Goto InstallSplitTunnelDriver_force_install
+	${Else}
+		IntFmt $0 "0x%X" $0
+		StrCpy $R0 "Failed to search for and evaluate driver: error $0"
+		log::LogWithDetails $R0 $1
+		Goto InstallSplitTunnelDriver_return
+	${EndIf}
+
+	InstallSplitTunnelDriver_new_install:
+	
+	${InstallSplitTunnelDriverCert}
+	
+	log::Log "Installing Split Tunneling driver"
+	nsExec::ExecToStack '"$TEMP\mullvad-split-tunnel\driverlogic.exe" st-new-install "$TEMP\mullvad-split-tunnel\mullvad-split-tunnel.inf"'
+	
+	Pop $0
+	Pop $1
+
+	${If} $0 != ${DL_GENERAL_SUCCESS}
+		IntFmt $0 "0x%X" $0
+		StrCpy $R0 "Failed to install driver: error $0"
+		log::LogWithDetails $R0 $1
+		Goto InstallSplitTunnelDriver_return
+	${EndIf}
+
+	Goto InstallSplitTunnelDriver_success
+
+	InstallSplitTunnelDriver_force_install:
+
+	#
+	# Would be possible to check driver state here and warn the user if driver is engaged.
+	#
+
+	log::Log "Installing Split Tunneling driver"
+	nsExec::ExecToStack '"$TEMP\mullvad-split-tunnel\driverlogic.exe" st-force-install "$TEMP\mullvad-split-tunnel\mullvad-split-tunnel.inf"'
+	
+	Pop $0
+	Pop $1
+
+	${If} $0 != ${DL_GENERAL_SUCCESS}
+		IntFmt $0 "0x%X" $0
+		StrCpy $R0 "Failed to install driver: error $0"
+		log::LogWithDetails $R0 $1
+		Goto InstallSplitTunnelDriver_return
+	${EndIf}
+
+	InstallSplitTunnelDriver_success:
+	
+	log::Log "InstallSplitTunnelDriver() completed successfully"
+
+	Push 0
+	Pop $R0
+
+	InstallSplitTunnelDriver_return:
+
+	Pop $1
+	Pop $0
+
+!macroend
+
+!define InstallSplitTunnelDriver '!insertmacro "InstallSplitTunnelDriver"'
+
+#
+# RemoveSplitTunnelDriver
+#
+# Reset and remove split tunnel driver
+#
+!macro RemoveSplitTunnelDriver
+
+	log::Log "RemoveSplitTunnelDriver()"
+
+	Push $0
+	Push $1
+
+	log::Log "Removing Split Tunneling driver"
+	nsExec::ExecToStack '"$TEMP\mullvad-split-tunnel\driverlogic.exe" st-remove'
+	
+	Pop $0
+	Pop $1
+
+	${If} $0 != ${DL_GENERAL_SUCCESS}
+		IntFmt $0 "0x%X" $0
+		StrCpy $R0 "Failed to remove driver: error $0"
+		log::LogWithDetails $R0 $1
+		Goto RemoveSplitTunnelDriver_return
+	${EndIf}
+	
+	log::Log "RemoveSplitTunnelDriver() completed successfully"
+
+	Push 0
+	Pop $R0
+
+	RemoveSplitTunnelDriver_return:
+
+	Pop $1
+	Pop $0
+
+!macroend
+
+!define RemoveSplitTunnelDriver '!insertmacro "RemoveSplitTunnelDriver"'
 
 #
 # InstallTrayIcon
@@ -568,26 +759,53 @@
 
 !define ClearFirewallRules '!insertmacro "ClearFirewallRules"'
 
-#
-# ClearAccountHistory
-#
-# Removes account history and any associated keys
-#
-!macro ClearAccountHistory
+!macro FirewallWarningCheck
 
-	log::Log "ClearAccountHistory()"
+	Push $0
+	Push $1
+	Push $2
+
+	nsExec::ExecToStack '"$SYSDIR\netsh.exe" wfp show security FILTER ${BLOCK_OUTBOUND_IPV4_FILTER_GUID}'
+	Pop $1
+	Pop $0
+
+	nsExec::ExecToStack '"$SYSDIR\netsh.exe" wfp show security FILTER ${PERSISTENT_BLOCK_OUTBOUND_IPV4_FILTER_GUID}'
+	Pop $2
+	Pop $0
+
+	${If} $1 == 0
+	${OrIf} $2 == 0
+		MessageBox MB_ICONEXCLAMATION|MB_OK "Installation failed. Your internet access will be unblocked."
+	${EndIf}
+
+	Pop $2
+	Pop $1
+	Pop $0
+
+!macroend
+
+!define FirewallWarningCheck '!insertmacro "FirewallWarningCheck"'
+
+#
+# RemoveWireGuardKey
+#
+# Remove the WireGuard key from the account, if there is one
+#
+!macro RemoveWireGuardKey
+
+	log::Log "RemoveWireGuardKey()"
 
 	Push $0
 	Push $1
 
-	nsExec::ExecToStack '"$TEMP\mullvad-setup.exe" clear-history'
+	nsExec::ExecToStack '"$TEMP\mullvad-setup.exe" remove-wireguard-key'
 	Pop $0
 	Pop $1
 
 	${If} $0 != ${MVSETUP_OK}
-		log::LogWithDetails "ClearAccountHistory() failed" $1
+		log::LogWithDetails "RemoveWireGuardKey() failed" $1
 	${Else}
-		log::Log "ClearAccountHistory() completed successfully"
+		log::Log "RemoveWireGuardKey() completed successfully"
 	${EndIf}
 
 	Pop $1
@@ -595,7 +813,7 @@
 
 !macroend
 
-!define ClearAccountHistory '!insertmacro "ClearAccountHistory"'
+!define RemoveWireGuardKey '!insertmacro "RemoveWireGuardKey"'
 
 
 #
@@ -688,10 +906,6 @@
 #
 !macro customInstall
 
-	Var /GLOBAL BlockFilterResult
-	Var /GLOBAL PersistentBlockFilterResult
-
-	Push $1
 	Push $R0
 
 	log::SetLogTarget ${LOG_INSTALL}
@@ -709,19 +923,6 @@
 	SetShellVarContext current
 	RMDir /r "$LOCALAPPDATA\mullvad-vpn-updater"
 
-	#
-	# Hack to check whether the uninstaller succeeded.
-	# This assumes that it got far enough to create a log file.
-	# Note that the uninstaller has already been replaced at this point.
-	#
-	SetShellVarContext all
-	IfFileExists "$LOCALAPPDATA\Mullvad VPN\uninstall.log" 0 customInstall_uninstaller_succeeded
-
-	MessageBox MB_OK "Failed to uninstall a previous version. Contact support or see the logs for more information."
-	Goto customInstall_abort_installation
-
-	customInstall_uninstaller_succeeded:
-
 	${MigrateCache}
 	${RemoveRelayCache}
 	${RemoveApiAddressCache}
@@ -737,6 +938,14 @@
 		${EndIf}
 	${EndIf}
 
+	${ExtractSplitTunnelDriver}
+	${InstallSplitTunnelDriver}
+
+	${If} $R0 != 0
+		MessageBox MB_OK "$R0"
+		Goto customInstall_abort_installation
+	${EndIf}
+	
 	${InstallService}
 
 	${If} $R0 != 0
@@ -759,29 +968,61 @@
 	#
 	Delete "$INSTDIR\mullvad vpn.exe"
 
-	nsExec::ExecToStack '"$SYSDIR\netsh.exe" wfp show security FILTER ${BLOCK_OUTBOUND_IPV4_FILTER_GUID}'
-	Pop $BlockFilterResult
-	Pop $1
-
-	nsExec::ExecToStack '"$SYSDIR\netsh.exe" wfp show security FILTER ${PERSISTENT_BLOCK_OUTBOUND_IPV4_FILTER_GUID}'
-	Pop $PersistentBlockFilterResult
-	Pop $1
-
-	${If} $BlockFilterResult == 0
-	${OrIf} $PersistentBlockFilterResult == 0
-		MessageBox MB_ICONEXCLAMATION|MB_YESNO "Do you wish to unblock your internet access? Doing so will leave you with an unsecure connection." IDNO customInstall_abort_installation_skip_firewall_revert
-		${ExtractMullvadSetup}
-		${ClearFirewallRules}
-	${EndIf}
-
-	customInstall_abort_installation_skip_firewall_revert:
+	${FirewallWarningCheck}
+	${ExtractMullvadSetup}
+	${ClearFirewallRules}
 
 	Abort
 
 	customInstall_skip_abort:
 
 	Pop $R0
-	Pop $1
+
+!macroend
+
+#
+# customUnInstallCheck
+#
+# This is called from the installer during an upgrade after the old version
+# has been uninstalled or failed to uninstall.
+#
+# The error flag is set if the uninstaller failed to run. Otherwise, $R0
+# contains the exit status.
+#
+!macro customUnInstallCheck
+
+	IfErrors 0 customUnInstallCheck_CheckReturnCode
+
+	log::SetLogTarget ${LOG_UNINSTALL}
+	log::Log "Unable to launch uninstaller for previous ${PRODUCT_NAME} version"
+
+	#
+	# If $INSTDIR is gone or can be removed, proceed anyway
+	#
+	IfFileExists $INSTDIR\*.* 0 customUnInstallCheck_Done
+	RMDir /r $INSTDIR
+	IfErrors 0 customUnInstallCheck_Done
+
+	log::Log "Aborting since $INSTDIR exists"
+	Goto customUnInstallCheck_Abort
+
+	customUnInstallCheck_CheckReturnCode:
+
+	${if} $R0 == 0
+		Goto customUnInstallCheck_Done
+	${endif}
+
+	customUnInstallCheck_Abort:
+
+	${FirewallWarningCheck}
+	${ExtractMullvadSetup}
+	${ClearFirewallRules}
+
+	MessageBox MB_OK "Failed to uninstall a previous version. Contact support or review the logs for more information."
+	SetErrorLevel 5
+	Abort
+
+	customUnInstallCheck_Done:
 
 !macroend
 
@@ -987,8 +1228,9 @@
 	# Break the install due to inconsistent state
 	Delete "$INSTDIR\mullvad vpn.exe"
 
-	# Clear firewall rules, or risk leaving persistent filters
-	${ClearFirewallRules}
+	${If} $FullUninstall == 1
+		${ClearFirewallRules}
+	${EndIf}
 
 	log::Log "Aborting uninstaller"
 	SetErrorLevel 1
@@ -1000,10 +1242,13 @@
 
 	${If} $FullUninstall == 1
 		${ClearFirewallRules}
-		${ClearAccountHistory}
+		${RemoveWireGuardKey}
 
 		${ExtractWintun}
 		${RemoveWintun}
+
+		${ExtractSplitTunnelDriver}
+		${RemoveSplitTunnelDriver}
 
 		log::SetLogTarget ${LOG_VOID}
 

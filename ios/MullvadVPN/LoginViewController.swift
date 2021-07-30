@@ -9,8 +9,6 @@
 import UIKit
 import Logging
 
-private let kMinimumAccountTokenLength = 10
-
 enum AuthenticationMethod {
     case existingAccount, newAccount
 }
@@ -22,7 +20,7 @@ enum LoginState {
     case success(AuthenticationMethod)
 }
 
-protocol LoginViewControllerDelegate: class {
+protocol LoginViewControllerDelegate: AnyObject {
     func loginViewController(_ controller: LoginViewController, loginWithAccountToken accountToken: String, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void)
     func loginViewControllerLoginWithNewAccount(_ controller: LoginViewController, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void)
     func loginViewControllerDidLogin(_ controller: LoginViewController)
@@ -41,7 +39,19 @@ class LoginViewController: UIViewController, RootContainment {
     }()
 
     private lazy var accountInputAccessoryLoginButton: UIBarButtonItem = {
-        return UIBarButtonItem(title: NSLocalizedString("Log in", comment: ""), style: .done, target: self, action: #selector(doLogin))
+        let barButtonItem = UIBarButtonItem(
+            title: NSLocalizedString(
+                "LOGIN_ACCESSORY_TOOLBAR_BUTTON_TITLE",
+                tableName: "Login",
+                comment: "Title for 'Log in' button displayed in toolbar above keyboard on iPhone."
+            ),
+            style: .done,
+            target: self,
+            action: #selector(doLogin)
+        )
+        barButtonItem.accessibilityIdentifier = "LoginBarButtonItem"
+
+        return barButtonItem
     }()
 
     private lazy var accountInputAccessoryToolbar: UIToolbar = {
@@ -69,8 +79,8 @@ class LoginViewController: UIViewController, RootContainment {
         return .lightContent
     }
 
-    var preferredHeaderBarStyle: HeaderBarStyle {
-        return .transparent
+    var preferredHeaderBarPresentation: HeaderBarPresentation {
+        return HeaderBarPresentation(style: .transparent, showsDivider: false)
     }
 
     var prefersHeaderBarHidden: Bool {
@@ -88,20 +98,31 @@ class LoginViewController: UIViewController, RootContainment {
             contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        contentView.accountTextField.inputAccessoryView = self.accountInputAccessoryToolbar
+        contentView.accountInputGroup.onSendButton = { [weak self] _ in
+            guard let self = self else { return }
 
-        // The return key on iPad should behave the same way as "Log in" button in the toolbar
-        if case .pad = UIDevice.current.userInterfaceIdiom {
-            contentView.accountTextField.onReturnKey = { [weak self] _ in
-                guard let self = self else { return true }
-
-                if self.canBeginLogin() {
-                    self.doLogin()
-                    return true
-                } else {
-                    return false
-                }
+            if self.canBeginLogin() {
+                self.doLogin()
             }
+        }
+
+        contentView.accountInputGroup.setOnReturnKey { [weak self] _ in
+            guard let self = self else { return true }
+
+            if self.canBeginLogin() {
+                self.doLogin()
+                return true
+            } else {
+                return false
+            }
+        }
+
+        // There is no need to set the input accessory toolbar on iPad since it has a dedicated
+        // button to dismiss the keyboard.
+        if case .phone = UIDevice.current.userInterfaceIdiom {
+            contentView.accountInputGroup.textField.inputAccessoryView = self.accountInputAccessoryToolbar
+        } else {
+            contentView.accountInputGroup.textField.inputAccessoryView = nil
         }
 
         updateDisplayedMessage()
@@ -115,14 +136,19 @@ class LoginViewController: UIViewController, RootContainment {
         notificationCenter.addObserver(self,
                                        selector: #selector(textDidChange(_:)),
                                        name: UITextField.textDidChangeNotification,
-                                       object: contentView.accountTextField)
+                                       object: contentView.accountInputGroup.textField)
+    }
+
+    override var disablesAutomaticKeyboardDismissal: Bool {
+        // Allow dismissing the keyboard in .formSheet presentation style
+        return false
     }
 
     // MARK: - Public
 
     func reset() {
         loginState = .default
-        contentView.accountTextField.autoformattingText = ""
+        contentView.accountInputGroup.clearToken()
         updateKeyboardToolbar()
     }
 
@@ -145,7 +171,7 @@ class LoginViewController: UIViewController, RootContainment {
     }
 
     @objc func doLogin() {
-        let accountToken = contentView.accountTextField.parsedToken
+        let accountToken = contentView.accountInputGroup.parsedToken
 
         beginLogin(method: .existingAccount)
         self.delegate?.loginViewController(self, loginWithAccountToken: accountToken, completion: { [weak self] (result) in
@@ -161,13 +187,13 @@ class LoginViewController: UIViewController, RootContainment {
     @objc func createNewAccount() {
         beginLogin(method: .newAccount)
 
-        contentView.accountTextField.autoformattingText = ""
+        contentView.accountInputGroup.clearToken()
         updateKeyboardToolbar()
 
         self.delegate?.loginViewControllerLoginWithNewAccount(self, completion: { [weak self] (result) in
             switch result {
             case .success(let response):
-                self?.contentView.accountTextField.autoformattingText = response.token
+                self?.contentView.accountInputGroup.setToken(response.token)
                 self?.endLogin(.success(.newAccount))
             case .failure(let error):
                 self?.endLogin(.failure(error))
@@ -178,7 +204,7 @@ class LoginViewController: UIViewController, RootContainment {
     // MARK: - Private
 
     private func loginStateDidChange() {
-        contentView.accountInputGroup.loginState = loginState
+        contentView.accountInputGroup.setLoginState(loginState, animated: true)
 
         // Keep the settings button disabled to prevent user from going to settings while
         // authentication or during the delay after the successful login and transition to the main
@@ -224,9 +250,8 @@ class LoginViewController: UIViewController, RootContainment {
 
         loginState = nextLoginState
 
-        if case .authenticating(.existingAccount) = oldLoginState,
-            case .failure = loginState {
-            contentView.accountTextField.becomeFirstResponder()
+        if case .authenticating(.existingAccount) = oldLoginState, case .failure = loginState {
+            contentView.accountInputGroup.textField.becomeFirstResponder()
         } else if case .success = loginState {
             // Navigate to the main view after 1s delay
             DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) {
@@ -242,12 +267,10 @@ class LoginViewController: UIViewController, RootContainment {
 
     private func updateKeyboardToolbar() {
         accountInputAccessoryLoginButton.isEnabled = canBeginLogin()
-        contentView.accountTextField.enableReturnKey = canBeginLogin()
     }
 
     private func canBeginLogin() -> Bool {
-        let accountTokenLength = contentView.accountTextField.parsedToken.count
-        return accountTokenLength >= kMinimumAccountTokenLength
+        return contentView.accountInputGroup.satisfiesMinimumTokenLengthRequirement
     }
 }
 
@@ -256,33 +279,51 @@ private extension LoginState {
     var localizedTitle: String {
         switch self {
         case .default:
-            return NSLocalizedString("Login", comment: "")
+            return NSLocalizedString("HEADING_TITLE_DEFAULT", tableName: "Login", comment: "Default login prompt heading.")
 
         case .authenticating:
-            return NSLocalizedString("Logging in...", comment: "")
+            return NSLocalizedString("HEADING_TITLE_AUTHENTICATING", tableName: "Login", comment: "Heading displayed during authentication.")
 
         case .failure:
-            return NSLocalizedString("Login failed", comment: "")
+            return NSLocalizedString("HEADING_TITLE_FAILURE", tableName: "Login", comment: "Heading displayed upon failure to authenticate.")
 
         case .success:
-            return NSLocalizedString("Logged in", comment: "")
+            return NSLocalizedString("HEADING_TITLE_SUCCESS", tableName: "Login", comment: "Heading displayed upon successful authentication.")
         }
     }
 
     var localizedMessage: String {
         switch self {
         case .default:
-            return NSLocalizedString("Enter your account number", comment: "")
+            return NSLocalizedString(
+                "SUBHEAD_TITLE_DEFAULT",
+                tableName: "Login",
+                comment: "Default login prompt subhead."
+            )
 
         case .authenticating(let method):
             switch method {
             case .existingAccount:
-                return NSLocalizedString("Checking account number", comment: "")
+                return NSLocalizedString(
+                    "SUBHEAD_TITLE_AUTHENTICATING",
+                    tableName: "Login",
+                    comment: "Subhead displayed during authentication."
+                )
             case .newAccount:
-                return NSLocalizedString("Creating new account", comment: "")
+                return NSLocalizedString(
+                    "SUBHEAD_TITLE_CREATING_ACCOUNT",
+                    tableName: "Login",
+                    comment: "Subhead displayed when creating new account."
+                )
             }
 
         case .failure(let error):
+            let localizedUnknownInternalError = NSLocalizedString(
+                "SUBHEAD_TITLE_INTERNAL_ERROR",
+                tableName: "Login",
+                comment: "Subhead displayed in the event of internal error."
+            )
+
             switch error {
             case .createAccount(let rpcError), .verifyAccount(let rpcError):
                 return rpcError.errorChainDescription ?? ""
@@ -291,12 +332,21 @@ private extension LoginState {
                     switch pushError {
                     case .network(let urlError):
                         return String(
-                            format: NSLocalizedString("Network error: %@", comment: ""),
+                            format: NSLocalizedString(
+                                "SUBHEAD_TITLE_NETWORK_ERROR_FORMAT",
+                                tableName: "Login",
+                                value: "Network error: %@",
+                                comment: "Subhead displayed in the event of network error. Use %@ placeholder to place localized text describing network failure."
+                            ),
                             urlError.localizedDescription
                         )
 
                     case .server(let serverError):
-                        var message = serverError.errorDescription ?? NSLocalizedString("Unknown server error.", comment: "")
+                        var message = serverError.errorDescription ?? NSLocalizedString(
+                            "SUBHEAD_TITLE_UNKNOWN_SERVER_ERROR",
+                            tableName: "Login",
+                            comment: "Subhead displayed in the event of unknown server error."
+                        )
 
                         if let recoverySuggestion = serverError.recoverySuggestion {
                             message.append("\n\(recoverySuggestion)")
@@ -305,19 +355,27 @@ private extension LoginState {
                         return message
 
                     case .encodePayload, .decodeErrorResponse, .decodeSuccessResponse:
-                        return NSLocalizedString("Internal error", comment: "")
+                        return localizedUnknownInternalError
                     }
                 } else {
-                    return NSLocalizedString("Internal error", comment: "")
+                    return localizedUnknownInternalError
                 }
             }
 
         case .success(let method):
             switch method {
             case .existingAccount:
-                return NSLocalizedString("Correct account number", comment: "")
+                return NSLocalizedString(
+                    "SUBHEAD_TITLE_SUCCESS",
+                    tableName: "Login",
+                    comment: "Subhead displayed upon successful authentication using existing account token."
+                )
             case .newAccount:
-                return NSLocalizedString("Account created", comment: "")
+                return NSLocalizedString(
+                    "SUBHEAD_TITLE_CREATED_ACCOUNT",
+                    tableName: "Login",
+                    comment: "Subhead displayed upon successful authentication with newly created account token."
+                )
             }
         }
     }

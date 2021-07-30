@@ -18,7 +18,7 @@ private enum UserDefaultsKeys: String {
     case accountExpiry = "accountExpiry"
 }
 
-protocol AccountObserver: class {
+protocol AccountObserver: AnyObject {
     func account(_ account: Account, didUpdateExpiry expiry: Date)
     func account(_ account: Account, didLoginWithToken token: String, expiry: Date)
     func accountDidLogout(_ account: Account)
@@ -102,7 +102,7 @@ class Account {
         case exclusive
     }
 
-    private let rest = MullvadRest(session: URLSession(configuration: .ephemeral))
+    private let rest = MullvadRest()
     private let operationQueue = OperationQueue()
     private lazy var exclusivityController = ExclusivityController<ExclusivityCategory>(operationQueue: operationQueue)
 
@@ -192,6 +192,26 @@ class Account {
         exclusivityController.addOperation(operation, categories: [.exclusive])
     }
 
+    /// Forget that user was logged in, but do not attempt to unset account in `TunnelManager`.
+    /// This function is used in cases where the tunnel or tunnel settings are corrupt.
+    func forget(completionHandler: @escaping () -> Void) {
+        let operation = AsyncBlockOperation { (finish) in
+            DispatchQueue.main.async {
+                self.removeFromPreferences()
+                self.observerList.forEach { (observer) in
+                    observer.accountDidLogout(self)
+                }
+                finish()
+            }
+        }
+
+        operation.addDidFinishBlockObserver(queue: .main) { (operation) in
+            completionHandler()
+        }
+
+        exclusivityController.addOperation(operation, categories: [.exclusive])
+    }
+
     func updateAccountExpiry() {
         let makeRequest = ResultOperation { () -> TokenPayload<EmptyPayload>? in
             return self.token.flatMap { (token) in
@@ -206,9 +226,11 @@ class Account {
         sendRequest.addDidFinishBlockObserver(queue: .main) { (operation, result) in
             switch result {
             case .success(let response):
-                self.expiry = response.expires
-                self.observerList.forEach { (observer) in
-                    observer.account(self, didUpdateExpiry: response.expires)
+                if self.expiry != response.expires {
+                    self.expiry = response.expires
+                    self.observerList.forEach { (observer) in
+                        observer.account(self, didUpdateExpiry: response.expires)
+                    }
                 }
 
             case .failure(let error):
@@ -270,7 +292,7 @@ extension Account: AppStorePaymentObserver {
         let operation = AsyncBlockOperation { (finish) in
             DispatchQueue.main.async {
                 // Make sure that payment corresponds to the active account token
-                if self.token == accountToken {
+                if self.token == accountToken, self.expiry != newExpiry {
                     self.expiry = newExpiry
                     self.observerList.forEach { (observer) in
                         observer.account(self, didUpdateExpiry: newExpiry)

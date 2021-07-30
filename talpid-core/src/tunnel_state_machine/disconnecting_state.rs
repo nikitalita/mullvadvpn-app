@@ -39,8 +39,8 @@ impl DisconnectingState {
                     }
                     AfterDisconnect::Nothing
                 }
-                Some(TunnelCommand::CustomDns(servers)) => {
-                    let _ = shared_values.set_custom_dns(servers);
+                Some(TunnelCommand::Dns(servers)) => {
+                    let _ = shared_values.set_dns_servers(servers);
                     AfterDisconnect::Nothing
                 }
                 Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
@@ -59,6 +59,11 @@ impl DisconnectingState {
                     shared_values.bypass_socket(fd, done_tx);
                     AfterDisconnect::Nothing
                 }
+                #[cfg(windows)]
+                Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                    let _ = result_tx.send(shared_values.split_tunnel.set_paths(&paths));
+                    AfterDisconnect::Nothing
+                }
             },
             AfterDisconnect::Block(reason) => match command {
                 Some(TunnelCommand::AllowLan(allow_lan)) => {
@@ -72,8 +77,8 @@ impl DisconnectingState {
                     }
                     AfterDisconnect::Block(reason)
                 }
-                Some(TunnelCommand::CustomDns(servers)) => {
-                    let _ = shared_values.set_custom_dns(servers);
+                Some(TunnelCommand::Dns(servers)) => {
+                    let _ = shared_values.set_dns_servers(servers);
                     AfterDisconnect::Block(reason)
                 }
                 Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
@@ -96,6 +101,11 @@ impl DisconnectingState {
                     shared_values.bypass_socket(fd, done_tx);
                     AfterDisconnect::Block(reason)
                 }
+                #[cfg(windows)]
+                Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                    let _ = result_tx.send(shared_values.split_tunnel.set_paths(&paths));
+                    AfterDisconnect::Block(reason)
+                }
                 None => AfterDisconnect::Block(reason),
             },
             AfterDisconnect::Reconnect(retry_attempt) => match command {
@@ -110,8 +120,8 @@ impl DisconnectingState {
                     }
                     AfterDisconnect::Reconnect(retry_attempt)
                 }
-                Some(TunnelCommand::CustomDns(servers)) => {
-                    let _ = shared_values.set_custom_dns(servers);
+                Some(TunnelCommand::Dns(servers)) => {
+                    let _ = shared_values.set_dns_servers(servers);
                     AfterDisconnect::Reconnect(retry_attempt)
                 }
                 Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
@@ -132,6 +142,11 @@ impl DisconnectingState {
                 #[cfg(target_os = "android")]
                 Some(TunnelCommand::BypassSocket(fd, done_tx)) => {
                     shared_values.bypass_socket(fd, done_tx);
+                    AfterDisconnect::Reconnect(retry_attempt)
+                }
+                #[cfg(windows)]
+                Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                    let _ = result_tx.send(shared_values.split_tunnel.set_paths(&paths));
                     AfterDisconnect::Reconnect(retry_attempt)
                 }
             },

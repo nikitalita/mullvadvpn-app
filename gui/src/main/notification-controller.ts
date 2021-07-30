@@ -13,7 +13,6 @@ import {
   SystemNotification,
   SystemNotificationProvider,
 } from '../shared/notifications/notification';
-import consumePromise from '../shared/promise';
 
 interface NotificationControllerDelegate {
   openApp(): void;
@@ -51,6 +50,7 @@ export default class NotificationController {
   public notifyTunnelState(
     tunnelState: TunnelState,
     blockWhenDisconnected: boolean,
+    hasExcludedApps: boolean,
     accountExpiry?: string,
   ) {
     const notificationProviders: SystemNotificationProvider[] = [
@@ -58,7 +58,7 @@ export default class NotificationController {
       new ConnectedNotificationProvider(tunnelState),
       new ReconnectingNotificationProvider(tunnelState),
       new DisconnectedNotificationProvider({ tunnelState, blockWhenDisconnected }),
-      new ErrorNotificationProvider({ tunnelState, accountExpiry }),
+      new ErrorNotificationProvider({ tunnelState, accountExpiry, hasExcludedApps }),
     ];
 
     const notificationProvider = notificationProviders.find((notification) =>
@@ -123,7 +123,7 @@ export default class NotificationController {
         notification.on('action', () => this.performAction(systemNotification.action));
       }
       notification.on('click', () => this.notificationControllerDelegate.openApp());
-    } else {
+    } else if (!(process.platform === 'win32' && systemNotification.critical)) {
       if (systemNotification.action) {
         notification.on('click', () => this.performAction(systemNotification.action));
       } else {
@@ -136,7 +136,7 @@ export default class NotificationController {
 
   private performAction(action?: NotificationAction) {
     if (action && action.type === 'open-url') {
-      consumePromise(this.notificationControllerDelegate.openLink(action.url, action.withAuth));
+      void this.notificationControllerDelegate.openLink(action.url, action.withAuth);
     }
   }
 

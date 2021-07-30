@@ -20,34 +20,6 @@ void *g_logSinkContext = nullptr;
 
 FwContext *g_fwContext = nullptr;
 
-std::optional<FwContext::PingableHosts> ConvertPingableHosts(const PingableHosts *pingableHosts)
-{
-	if (nullptr == pingableHosts)
-	{
-		return {};
-	}
-
-	if (nullptr == pingableHosts->hosts
-		|| 0 == pingableHosts->numHosts)
-	{
-		THROW_ERROR("Invalid PingableHosts structure");
-	}
-
-	FwContext::PingableHosts converted;
-
-	if (nullptr != pingableHosts->tunnelInterfaceAlias)
-	{
-		converted.tunnelInterfaceAlias = pingableHosts->tunnelInterfaceAlias;
-	}
-
-	for (size_t i = 0; i < pingableHosts->numHosts; ++i)
-	{
-		converted.hosts.emplace_back(wfp::IpAddress(pingableHosts->hosts[i]));
-	}
-
-	return converted;
-}
-
 WINFW_POLICY_STATUS
 HandlePolicyException(const common::error::WindowsException &err)
 {
@@ -260,7 +232,7 @@ WinFw_ApplyPolicyConnecting(
 	const WinFwSettings *settings,
 	const WinFwEndpoint *relay,
 	const wchar_t *relayClient,
-	const PingableHosts *pingableHosts,
+	const wchar_t *tunnelInterfaceAlias,
 	const WinFwEndpoint *allowedEndpoint
 )
 {
@@ -290,7 +262,7 @@ WinFw_ApplyPolicyConnecting(
 			*settings,
 			*relay,
 			relayClient,
-			ConvertPingableHosts(pingableHosts),
+			tunnelInterfaceAlias != nullptr ? std::make_optional(tunnelInterfaceAlias) : std::nullopt,
 			MakeOptional(allowedEndpoint)
 		) ? WINFW_POLICY_STATUS_SUCCESS : WINFW_POLICY_STATUS_GENERAL_FAILURE;
 	}

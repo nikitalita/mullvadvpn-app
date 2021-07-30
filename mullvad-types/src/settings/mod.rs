@@ -6,11 +6,13 @@ use crate::{
     wireguard,
 };
 #[cfg(target_os = "android")]
-use jnix::{FromJava, IntoJava};
+use jnix::{jni::objects::JObject, FromJava, IntoJava, JnixEnv};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::net::IpAddr;
+#[cfg(target_os = "windows")]
+use std::{collections::HashSet, path::PathBuf};
 use talpid_types::net::{self, openvpn, GenericTunnelOptions};
 
 mod migrations;
@@ -38,6 +40,8 @@ pub enum Error {
 #[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub struct Settings {
     account_token: Option<String>,
+    #[cfg_attr(target_os = "android", jnix(skip))]
+    wireguard: Option<wireguard::WireguardData>,
     relay_settings: RelaySettings,
     #[cfg_attr(target_os = "android", jnix(skip))]
     pub bridge_settings: BridgeSettings,
@@ -56,15 +60,28 @@ pub struct Settings {
     pub tunnel_options: TunnelOptions,
     /// Whether to notify users of beta updates.
     pub show_beta_releases: bool,
+    /// Split tunneling settings
+    #[cfg(windows)]
+    pub split_tunnel: SplitTunnelSettings,
     /// Specifies settings schema version
     #[cfg_attr(target_os = "android", jnix(skip))]
     settings_version: migrations::SettingsVersion,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct SplitTunnelSettings {
+    /// Toggles split tunneling on or off
+    pub enable_exclusions: bool,
+    /// List of applications to exclude from the tunnel.
+    pub apps: HashSet<PathBuf>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             account_token: None,
+            wireguard: None,
             relay_settings: RelaySettings::Normal(RelayConstraints {
                 location: Constraint::Only(LocationConstraint::Country("se".to_owned())),
                 ..Default::default()
@@ -76,6 +93,8 @@ impl Default for Settings {
             auto_connect: false,
             tunnel_options: TunnelOptions::default(),
             show_beta_releases: false,
+            #[cfg(windows)]
+            split_tunnel: SplitTunnelSettings::default(),
             settings_version: migrations::CURRENT_SETTINGS_VERSION,
         }
     }
@@ -120,6 +139,19 @@ impl Settings {
         }
     }
 
+    pub fn get_wireguard(&self) -> Option<wireguard::WireguardData> {
+        self.wireguard.clone()
+    }
+
+    pub fn set_wireguard(&mut self, wireguard: Option<wireguard::WireguardData>) -> bool {
+        if wireguard != self.wireguard {
+            self.wireguard = wireguard;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get_relay_settings(&self) -> RelaySettings {
         self.relay_settings.clone()
     }
@@ -143,8 +175,8 @@ impl Settings {
         }
     }
 
-    pub fn get_bridge_state(&self) -> &BridgeState {
-        &self.bridge_state
+    pub fn get_bridge_state(&self) -> BridgeState {
+        self.bridge_state
     }
 
     pub fn set_bridge_state(&mut self, bridge_state: BridgeState) -> bool {
@@ -174,19 +206,87 @@ pub struct TunnelOptions {
     /// Contains generic tunnel options that may apply to more than a single tunnel type.
     #[cfg_attr(target_os = "android", jnix(skip))]
     pub generic: GenericTunnelOptions,
-    /// Custom DNS options.
+    /// DNS options.
     pub dns_options: DnsOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsState {
+    Default,
+    Custom,
+}
+
+impl Default for DnsState {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+/// DNS config
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[cfg_attr(target_os = "android", derive(IntoJava))]
+#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
+pub struct DnsOptions {
+    #[cfg_attr(target_os = "android", jnix(map = "|state| state == DnsState::Custom"))]
+    pub state: DnsState,
+    #[cfg_attr(target_os = "android", jnix(skip))]
+    pub default_options: DefaultDnsOptions,
+    #[cfg_attr(target_os = "android", jnix(map = "|opts| opts.addresses"))]
+    pub custom_options: CustomDnsOptions,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[cfg_attr(target_os = "android", derive(FromJava))]
+#[cfg_attr(
+    target_os = "android",
+    jnix(class_name = "net.mullvad.mullvadvpn.model.DnsOptions")
+)]
+pub struct AndroidDnsOptions {
+    pub custom: bool,
+    pub addresses: Vec<IpAddr>,
+}
+
+#[cfg(target_os = "android")]
+impl From<AndroidDnsOptions> for DnsOptions {
+    fn from(options: AndroidDnsOptions) -> Self {
+        Self {
+            state: if options.custom {
+                DnsState::Custom
+            } else {
+                DnsState::Default
+            },
+            default_options: DefaultDnsOptions::default(),
+            custom_options: CustomDnsOptions {
+                addresses: options.addresses,
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl<'env, 'sub_env> FromJava<'env, JObject<'sub_env>> for DnsOptions
+where
+    'env: 'sub_env,
+{
+    const JNI_SIGNATURE: &'static str = "Lnet/mullvad/mullvadvpn/model/DnsOptions";
+
+    fn from_java(env: &JnixEnv<'env>, object: JObject<'sub_env>) -> Self {
+        AndroidDnsOptions::from_java(env, object).into()
+    }
+}
+
+/// Default DNS config
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct DefaultDnsOptions {
+    pub block_ads: bool,
+    pub block_trackers: bool,
 }
 
 /// Custom DNS config
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(default)]
-#[cfg_attr(target_os = "android", derive(FromJava, IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
-pub struct DnsOptions {
-    /// Whether to use the addresses in `custom_dns`.
-    pub custom: bool,
-    /// Custom DNS servers to use.
+pub struct CustomDnsOptions {
     pub addresses: Vec<IpAddr>,
 }
 

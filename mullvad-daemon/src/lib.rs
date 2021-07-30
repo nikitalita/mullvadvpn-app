@@ -15,7 +15,7 @@ mod relays;
 #[cfg(not(target_os = "android"))]
 pub mod rpc_uniqueness_check;
 pub mod runtime;
-mod settings;
+pub mod settings;
 pub mod version;
 mod version_check;
 
@@ -35,7 +35,7 @@ use mullvad_types::{
         RelaySettingsUpdate,
     },
     relay_list::{Relay, RelayList},
-    settings::{DnsOptions, Settings},
+    settings::{DnsOptions, DnsState, Settings},
     states::{TargetState, TunnelState},
     version::{AppVersion, AppVersionInfo},
     wireguard::{KeygenEvent, RotationInterval},
@@ -43,6 +43,8 @@ use mullvad_types::{
 use settings::SettingsPersister;
 #[cfg(target_os = "android")]
 use std::os::unix::io::RawFd;
+#[cfg(target_os = "windows")]
+use std::{collections::HashSet, ffi::OsString};
 use std::{
     marker::PhantomData,
     mem,
@@ -52,7 +54,7 @@ use std::{
     sync::{mpsc as sync_mpsc, Arc, Weak},
     time::Duration,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use talpid_core::split_tunnel;
 use talpid_core::{
     mpsc::Sender,
@@ -78,7 +80,13 @@ const TUNNEL_STATE_MACHINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRST_KEY_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Delay between generating a new WireGuard key and reconnecting
-const WG_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const WG_RECONNECT_DELAY: Duration = Duration::from_secs(4 * 60);
+
+lazy_static::lazy_static! {
+    static ref DNS_AD_BLOCKING_SERVERS: [IpAddr; 1] = ["100.64.0.1".parse().unwrap()];
+    static ref DNS_TRACKER_BLOCKING_SERVERS: [IpAddr; 1] = ["100.64.0.2".parse().unwrap()];
+    static ref DNS_AD_TRACKER_BLOCKING_SERVERS: [IpAddr; 1] = ["100.64.0.3".parse().unwrap()];
+}
 
 pub type ResponseTx<T, E> = oneshot::Sender<Result<T, E>>;
 
@@ -97,18 +105,28 @@ pub enum Error {
     #[error(display = "REST request failed")]
     RestError(#[error(source)] mullvad_rpc::rest::Error),
 
-    #[error(display = "Unable to load account history with wireguard key cache")]
+    #[error(display = "Unable to load account history")]
     LoadAccountHistory(#[error(source)] account_history::Error),
 
     #[cfg(target_os = "linux")]
     #[error(display = "Unable to initialize split tunneling")]
     InitSplitTunneling(#[error(source)] split_tunnel::Error),
 
+    #[error(display = "The account has too many wireguard keys")]
+    TooManyKeys,
+
+    #[cfg(windows)]
+    #[error(display = "Split tunneling error")]
+    SplitTunnelError(#[error(source)] split_tunnel::Error),
+
     #[error(display = "No wireguard private key available")]
     NoKeyAvailable,
 
     #[error(display = "No bridge available")]
     NoBridgeAvailable,
+
+    #[error(display = "No matching entry relay was found")]
+    NoEntryRelayAvailable,
 
     #[error(display = "No account token is set")]
     NoAccountToken,
@@ -186,10 +204,8 @@ pub enum DaemonCommand {
     /// Submit voucher to add time to the current account. Returns time added in seconds
     SubmitVoucher(ResponseTx<VoucherSubmission, Error>, String),
     /// Request account history
-    GetAccountHistory(oneshot::Sender<Vec<AccountToken>>),
-    /// Request account history
-    RemoveAccountFromHistory(ResponseTx<(), Error>, AccountToken),
-    /// Clear account history
+    GetAccountHistory(oneshot::Sender<Option<AccountToken>>),
+    /// Remove the last used account, if there is one
     ClearAccountHistory(ResponseTx<(), Error>),
     /// Get the list of countries and cities where there are relays.
     GetRelayLocations(oneshot::Sender<RelayList>),
@@ -216,7 +232,7 @@ pub enum DaemonCommand {
     SetBridgeState(ResponseTx<(), settings::Error>, BridgeState),
     /// Set if IPv6 should be enabled in the tunnel
     SetEnableIpv6(ResponseTx<(), settings::Error>, bool),
-    /// Set custom DNS servers to use instead of passing requests to the gateway
+    /// Set DNS options or servers to use
     SetDnsOptions(ResponseTx<(), settings::Error>, DnsOptions),
     /// Set MTU for wireguard tunnels
     SetWireguardMtu(ResponseTx<(), settings::Error>, Option<u16>),
@@ -249,6 +265,18 @@ pub enum DaemonCommand {
     /// Clear list of processes excluded from the tunnel
     #[cfg(target_os = "linux")]
     ClearSplitTunnelProcesses(ResponseTx<(), split_tunnel::Error>),
+    /// Exclude traffic of an application from the tunnel
+    #[cfg(windows)]
+    AddSplitTunnelApp(ResponseTx<(), Error>, PathBuf),
+    /// Remove application from list of apps to exclude from the tunnel
+    #[cfg(windows)]
+    RemoveSplitTunnelApp(ResponseTx<(), Error>, PathBuf),
+    /// Clear list of apps to exclude from the tunnel
+    #[cfg(windows)]
+    ClearSplitTunnelApps(ResponseTx<(), Error>),
+    /// Disable split tunnel
+    #[cfg(windows)]
+    SetSplitTunnelState(ResponseTx<(), Error>, bool),
     /// Makes the daemon exit the main loop and quit.
     Shutdown,
     /// Saves the target tunnel state and enters a blocking state. The state is restored
@@ -571,7 +599,7 @@ where
         );
         tokio::spawn(version_updater.run());
         let account_history =
-            account_history::AccountHistory::new(&cache_dir, &settings_dir, rpc_handle.clone())
+            account_history::AccountHistory::new(&cache_dir, &settings_dir, &mut settings)
                 .await
                 .map_err(Error::LoadAccountHistory)?;
 
@@ -625,11 +653,22 @@ where
             rpc_runtime.address_cache.peek_address(),
             TransportProtocol::Tcp,
         );
+        #[cfg(windows)]
+        let exclude_apps = if settings.split_tunnel.enable_exclusions {
+            settings
+                .split_tunnel
+                .apps
+                .iter()
+                .map(|s| OsString::from(s))
+                .collect()
+        } else {
+            vec![]
+        };
 
         let tunnel_command_tx = tunnel_state_machine::spawn(
             settings.allow_lan,
             settings.block_when_disconnected,
-            Self::get_custom_resolvers(&settings.tunnel_options.dns_options),
+            Self::get_dns_resolvers(&settings.tunnel_options.dns_options),
             initial_api_endpoint,
             tunnel_parameters_generator,
             log_dir,
@@ -640,6 +679,8 @@ where
             initial_target_state != TargetState::Secured,
             #[cfg(target_os = "android")]
             android_context,
+            #[cfg(windows)]
+            exclude_apps,
         )
         .await
         .map_err(Error::TunnelError)?;
@@ -694,11 +735,28 @@ where
         Ok(daemon)
     }
 
-    fn get_custom_resolvers(dns_options: &DnsOptions) -> Option<Vec<IpAddr>> {
-        if dns_options.custom && !dns_options.addresses.is_empty() {
-            Some(dns_options.addresses.clone())
-        } else {
-            None
+    fn get_dns_resolvers(options: &DnsOptions) -> Option<Vec<IpAddr>> {
+        match options.state {
+            DnsState::Default => {
+                if options.default_options.block_ads {
+                    if options.default_options.block_trackers {
+                        Some(DNS_AD_TRACKER_BLOCKING_SERVERS.to_vec())
+                    } else {
+                        Some(DNS_AD_BLOCKING_SERVERS.to_vec())
+                    }
+                } else if options.default_options.block_trackers {
+                    Some(DNS_TRACKER_BLOCKING_SERVERS.to_vec())
+                } else {
+                    None
+                }
+            }
+            DnsState::Custom => {
+                if options.custom_options.addresses.is_empty() {
+                    None
+                } else {
+                    Some(options.custom_options.addresses.clone())
+                }
+            }
         }
     }
 
@@ -912,12 +970,7 @@ where
                             &constraints,
                             self.settings.get_bridge_state(),
                             retry_attempt,
-                            self.account_history
-                                .get(&account_token)
-                                .await
-                                .unwrap_or(None)
-                                .and_then(|entry| entry.wireguard)
-                                .is_some(),
+                            self.settings.get_wireguard().is_some(),
                         )
                         .ok();
                     if let Some((relay, endpoint)) = endpoint {
@@ -1036,16 +1089,11 @@ where
             }
             MullvadEndpoint::Wireguard {
                 peer,
+                exit_peer,
                 ipv4_gateway,
                 ipv6_gateway,
             } => {
-                let wg_data = self
-                    .account_history
-                    .get(&account_token)
-                    .await
-                    .map_err(Error::AccountHistory)?
-                    .and_then(|entry| entry.wireguard)
-                    .ok_or(Error::NoKeyAvailable)?;
+                let wg_data = self.settings.get_wireguard().ok_or(Error::NoKeyAvailable)?;
                 let tunnel = wireguard::TunnelConfig {
                     private_key: wg_data.private_key,
                     addresses: vec![
@@ -1057,6 +1105,7 @@ where
                     connection: wireguard::ConnectionConfig {
                         tunnel,
                         peer,
+                        exit_peer,
                         ipv4_gateway,
                         ipv6_gateway: Some(ipv6_gateway),
                     },
@@ -1071,7 +1120,7 @@ where
     async fn schedule_reconnect(&mut self, delay: Duration) {
         let tunnel_command_tx = self.tx.to_specialized_sender();
         let (future, abort_handle) = abortable(Box::pin(async move {
-            tokio::time::delay_for(delay).await;
+            tokio::time::sleep(delay).await;
             log::debug!("Attempting to reconnect");
             let (tx, _) = oneshot::channel();
             let _ = tunnel_command_tx.send(DaemonCommand::Reconnect(tx));
@@ -1107,9 +1156,6 @@ where
             UpdateRelayLocations => self.on_update_relay_locations().await,
             SetAccount(tx, account_token) => self.on_set_account(tx, account_token).await,
             GetAccountHistory(tx) => self.on_get_account_history(tx),
-            RemoveAccountFromHistory(tx, account_token) => {
-                self.on_remove_account_from_history(tx, account_token).await
-            }
             ClearAccountHistory(tx) => self.on_clear_account_history(tx).await,
             UpdateRelaySettings(tx, update) => self.on_update_relay_settings(tx, update).await,
             SetAllowLan(tx, allow_lan) => self.on_set_allow_lan(tx, allow_lan).await,
@@ -1146,6 +1192,14 @@ where
             RemoveSplitTunnelProcess(tx, pid) => self.on_remove_split_tunnel_process(tx, pid),
             #[cfg(target_os = "linux")]
             ClearSplitTunnelProcesses(tx) => self.on_clear_split_tunnel_processes(tx),
+            #[cfg(windows)]
+            AddSplitTunnelApp(tx, path) => self.on_add_split_tunnel_app(tx, path).await,
+            #[cfg(windows)]
+            RemoveSplitTunnelApp(tx, path) => self.on_remove_split_tunnel_app(tx, path).await,
+            #[cfg(windows)]
+            ClearSplitTunnelApps(tx) => self.on_clear_split_tunnel_apps(tx).await,
+            #[cfg(windows)]
+            SetSplitTunnelState(tx, enabled) => self.on_set_split_tunnel_state(tx, enabled).await,
             Shutdown => self.trigger_shutdown_event(),
             PrepareRestart => self.on_prepare_restart(),
             #[cfg(target_os = "android")]
@@ -1176,27 +1230,15 @@ where
         match result {
             Ok(data) => {
                 let public_key = data.get_public_key();
-                let mut account_entry = self
-                    .account_history
-                    .get(&account)
-                    .await
-                    .ok()
-                    .and_then(|entry| entry)
-                    .unwrap_or_else(|| account_history::AccountEntry {
-                        account: account.clone(),
-                        wireguard: None,
-                    });
-                // if no key existed before
-                let first_key_for_account_on_host = account_entry.wireguard.is_none();
-                account_entry.wireguard = Some(data);
-                match self.account_history.insert(account_entry).await {
+                let is_first_key = self.settings.get_wireguard().is_none();
+                match self.settings.set_wireguard(Some(data)).await {
                     Ok(_) => {
                         if let Some(TunnelType::Wireguard) = self.get_connected_tunnel_type() {
                             self.schedule_reconnect(WG_RECONNECT_DELAY).await;
                         }
                         self.event_listener
                             .notify_key_event(KeygenEvent::NewKey(public_key));
-                        if first_key_for_account_on_host {
+                        if is_first_key {
                             self.ensure_key_rotation().await;
                         }
                     }
@@ -1228,15 +1270,21 @@ where
     }
 
     async fn ensure_key_rotation(&mut self) {
-        if let Some(token) = self.settings.get_account_token() {
-            self.wireguard_key_manager
-                .set_rotation_interval(
-                    &mut self.account_history,
-                    token,
-                    self.settings.tunnel_options.wireguard.rotation_interval,
-                )
-                .await;
-        }
+        let token = match self.settings.get_account_token() {
+            Some(token) => token,
+            None => return,
+        };
+        let public_key = match self.settings.get_wireguard() {
+            Some(data) => data.get_public_key(),
+            None => return,
+        };
+        self.wireguard_key_manager
+            .set_rotation_interval(
+                public_key,
+                token,
+                self.settings.tunnel_options.wireguard.rotation_interval,
+            )
+            .await;
     }
 
     async fn handle_new_account_event(
@@ -1472,6 +1520,7 @@ where
         &mut self,
         account_token: Option<String>,
     ) -> Result<bool, settings::Error> {
+        let previous_token = self.settings.get_account_token();
         let account_changed = self
             .settings
             .set_account_token(account_token.clone())
@@ -1480,55 +1529,93 @@ where
             self.event_listener
                 .notify_settings(self.settings.to_settings());
 
-            // Bump account history if a token was set
-            if let Some(token) = account_token.clone() {
-                if let Err(e) = self.account_history.bump_history(&token).await {
-                    log::error!("Failed to bump account history: {}", e);
-                }
+            let history_token = match account_token {
+                Some(token) => token,
+                None => previous_token.clone().unwrap_or("".to_string()),
+            };
+            if let Err(error) = self.account_history.set(history_token).await {
+                log::error!(
+                    "{}",
+                    error.display_chain_with_msg("Failed to update account history")
+                );
             }
 
+            if let Some(previous_token) = previous_token {
+                if let Some(previous_key) = self
+                    .settings
+                    .get_wireguard()
+                    .map(|data| data.private_key.public_key())
+                {
+                    let remove_key = self
+                        .wireguard_key_manager
+                        .remove_key(previous_token, previous_key);
+                    tokio::spawn(async move {
+                        if let Err(error) = remove_key.await {
+                            log::error!(
+                                "{}",
+                                error.display_chain_with_msg(
+                                    "Failed to remove WireGuard key for previous account"
+                                )
+                            );
+                        }
+                    });
+                }
+            }
+            if let Err(error) = self.settings.set_wireguard(None).await {
+                log::error!(
+                    "{}",
+                    error.display_chain_with_msg("Error resetting WireGuard key")
+                );
+            }
             self.ensure_wireguard_keys_for_current_account().await;
         }
         Ok(account_changed)
     }
 
-    fn on_get_account_history(&mut self, tx: oneshot::Sender<Vec<AccountToken>>) {
+    fn on_get_account_history(&mut self, tx: oneshot::Sender<Option<AccountToken>>) {
         Self::oneshot_send(
             tx,
-            self.account_history.get_account_history(),
+            self.account_history.get(),
             "get_account_history response",
         );
     }
 
-    async fn on_remove_account_from_history(
-        &mut self,
-        tx: ResponseTx<(), Error>,
-        account_token: AccountToken,
-    ) {
+    async fn on_clear_account_history(&mut self, tx: ResponseTx<(), Error>) {
         let result = self
             .account_history
-            .remove_account(&account_token)
+            .clear()
             .await
             .map_err(Error::AccountHistory);
-        Self::oneshot_send(tx, result, "remove_account_from_history response");
+        Self::oneshot_send(tx, result, "clear_account_history response");
     }
 
-    async fn on_clear_account_history(&mut self, tx: ResponseTx<(), Error>) {
-        match self.account_history.clear().await {
-            Ok(_) => {
-                self.set_target_state(TargetState::Unsecured).await;
-                Self::oneshot_send(tx, Ok(()), "clear_account_history response");
+    // Remove the key associated with the current account, if there is one.
+    // This does not modify settings or account history.
+    #[cfg(not(target_os = "android"))]
+    fn remove_current_key_rpc(&self) -> impl std::future::Future<Output = Result<(), Error>> {
+        let remove_key = if let Some(token) = self.settings.get_account_token() {
+            if let Some(wg_data) = self.settings.get_wireguard() {
+                Some(
+                    self.wireguard_key_manager
+                        .remove_key(token, wg_data.private_key.public_key()),
+                )
+            } else {
+                None
             }
-            Err(err) => {
-                log::error!(
-                    "{}",
-                    err.display_chain_with_msg("Failed to clear account history")
-                );
-                Self::oneshot_send(
-                    tx,
-                    Err(Error::AccountHistory(err)),
-                    "clear_account_history response",
-                );
+        } else {
+            None
+        };
+
+        async move {
+            if let Some(task) = remove_key {
+                match task.await {
+                    Err(wireguard::Error::RestError(error)) => Err(Error::RestError(error)),
+                    // This result should never occur
+                    Err(wireguard::Error::TooManyKeys) => Err(Error::TooManyKeys),
+                    _ => Ok(()),
+                }
+            } else {
+                Ok(())
             }
         }
     }
@@ -1559,15 +1646,29 @@ where
     async fn on_factory_reset(&mut self, tx: ResponseTx<(), Error>) {
         let mut last_error = Ok(());
 
+        let remove_key = self.remove_current_key_rpc();
+        tokio::spawn(async move {
+            if let Err(error) = remove_key.await {
+                log::error!(
+                    "{}",
+                    error.display_chain_with_msg(
+                        "Failed to remove WireGuard key for previous account"
+                    )
+                );
+            }
+        });
+
+        if let Err(error) = self.account_history.clear().await {
+            log::error!(
+                "{}",
+                error.display_chain_with_msg("Failed to clear account history")
+            );
+            last_error = Err(Error::ClearAccountHistoryError(error));
+        }
 
         if let Err(e) = self.settings.reset().await {
             log::error!("Failed to reset settings - {}", e);
             last_error = Err(Error::ClearSettingsError(e));
-        }
-
-        if let Err(e) = self.account_history.clear().await {
-            log::error!("Failed to clear account history - {}", e);
-            last_error = Err(Error::ClearAccountHistoryError(e));
         }
 
         // Shut the daemon down.
@@ -1631,6 +1732,159 @@ where
             error
         });
         Self::oneshot_send(tx, result, "clear_split_tunnel_processes response");
+    }
+
+    /// Update the split app paths in both the settings and tunnel
+    #[cfg(windows)]
+    async fn set_split_tunnel_paths(
+        &mut self,
+        tx: ResponseTx<(), Error>,
+        response_msg: &'static str,
+        settings: Settings,
+        new_list: HashSet<PathBuf>,
+    ) {
+        if new_list == settings.split_tunnel.apps {
+            Self::oneshot_send(tx, Ok(()), response_msg);
+            return;
+        }
+
+        if settings.split_tunnel.enable_exclusions {
+            let (result_tx, result_rx) = oneshot::channel();
+            self.send_tunnel_command(TunnelCommand::SetExcludedApps(
+                result_tx,
+                new_list.iter().map(|s| OsString::from(s)).collect(),
+            ));
+            match result_rx.await {
+                Ok(Ok(_)) => (),
+                Ok(Err(error)) => {
+                    log::error!(
+                        "{}",
+                        error.display_chain_with_msg("Failed to set excluded apps list")
+                    );
+                    Self::oneshot_send(tx, Err(Error::SplitTunnelError(error)), response_msg);
+                    return;
+                }
+                Err(_) => {
+                    log::error!("The tunnel failed to return a result");
+                    return;
+                }
+            }
+        }
+
+        let save_result = self
+            .settings
+            .set_split_tunnel_apps(new_list)
+            .await
+            .map_err(Error::SettingsError);
+        match save_result {
+            Ok(true) => {
+                Self::oneshot_send(tx, Ok(()), response_msg);
+                self.event_listener
+                    .notify_settings(self.settings.to_settings());
+            }
+            Err(error) => {
+                Self::oneshot_send(tx, Err(error), response_msg);
+            }
+            Ok(false) => {
+                // unreachable!("new_list != settings.split_tunnel_apps")
+                error!("BUG: new_list != settings.split_tunnel_apps");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    async fn on_add_split_tunnel_app(&mut self, tx: ResponseTx<(), Error>, path: PathBuf) {
+        let settings = self.settings.to_settings();
+
+        let mut new_list = settings.split_tunnel.apps.clone();
+        new_list.insert(path);
+
+        self.set_split_tunnel_paths(tx, "add_split_tunnel_app response", settings, new_list)
+            .await;
+    }
+
+    #[cfg(windows)]
+    async fn on_remove_split_tunnel_app(&mut self, tx: ResponseTx<(), Error>, path: PathBuf) {
+        let settings = self.settings.to_settings();
+
+        let mut new_list = settings.split_tunnel.apps.clone();
+        new_list.remove(&path);
+
+        self.set_split_tunnel_paths(tx, "remove_split_tunnel_app response", settings, new_list)
+            .await;
+    }
+
+    #[cfg(windows)]
+    async fn on_clear_split_tunnel_apps(&mut self, tx: ResponseTx<(), Error>) {
+        let settings = self.settings.to_settings();
+        let new_list = HashSet::new();
+        self.set_split_tunnel_paths(tx, "clear_split_tunnel_apps response", settings, new_list)
+            .await;
+    }
+
+    #[cfg(windows)]
+    async fn on_set_split_tunnel_state(&mut self, tx: ResponseTx<(), Error>, enabled: bool) {
+        let settings = self.settings.to_settings();
+
+        if enabled != settings.split_tunnel.enable_exclusions {
+            let new_list = if enabled {
+                settings.split_tunnel.apps.clone()
+            } else {
+                HashSet::new()
+            };
+            if !settings.split_tunnel.apps.is_empty() {
+                let (result_tx, result_rx) = oneshot::channel();
+                self.send_tunnel_command(TunnelCommand::SetExcludedApps(
+                    result_tx,
+                    new_list.iter().map(|app| OsString::from(app)).collect(),
+                ));
+                match result_rx.await {
+                    Ok(Ok(_)) => (),
+                    Ok(Err(error)) => {
+                        log::error!(
+                            "{}",
+                            error.display_chain_with_msg("Failed to set excluded apps list")
+                        );
+                        Self::oneshot_send(
+                            tx,
+                            Err(Error::SplitTunnelError(error)),
+                            "set_split_tunnel_state response",
+                        );
+                        return;
+                    }
+                    Err(_) => {
+                        log::error!("The tunnel failed to return a result");
+                        return;
+                    }
+                }
+            }
+
+            let save_result = self
+                .settings
+                .set_split_tunnel_state(enabled)
+                .await
+                .map_err(Error::SettingsError);
+            match save_result {
+                Ok(true) => {
+                    Self::oneshot_send(tx, Ok(()), "set_split_tunnel_state response");
+                    self.event_listener
+                        .notify_settings(self.settings.to_settings());
+                }
+                Err(error) => {
+                    error!(
+                        "{}",
+                        error.display_chain_with_msg("Unable to save settings")
+                    );
+                    Self::oneshot_send(tx, Err(error), "set_split_tunnel_state response");
+                }
+                Ok(false) => {
+                    // unreachable!("enabled != settings.split_tunnel"),
+                    error!("BUG: enabled != settings.split_tunnel");
+                }
+            }
+        } else {
+            Self::oneshot_send(tx, Ok(()), "set_split_tunnel_state response");
+        }
     }
 
     async fn on_update_relay_settings(
@@ -1854,10 +2108,9 @@ where
                 Self::oneshot_send(tx, Ok(()), "set_dns_options response");
                 if settings_changed {
                     let settings = self.settings.to_settings();
-                    let resolvers =
-                        Self::get_custom_resolvers(&settings.tunnel_options.dns_options);
+                    let resolvers = Self::get_dns_resolvers(&settings.tunnel_options.dns_options);
                     self.event_listener.notify_settings(settings);
-                    self.send_tunnel_command(TunnelCommand::CustomDns(resolvers));
+                    self.send_tunnel_command(TunnelCommand::Dns(resolvers));
                 }
             }
             Err(e) => {
@@ -1921,13 +2174,7 @@ where
 
     async fn ensure_wireguard_keys_for_current_account(&mut self) {
         if let Some(account) = self.settings.get_account_token() {
-            if self
-                .account_history
-                .get(&account)
-                .await
-                .map(|entry| entry.map(|e| e.wireguard.is_none()).unwrap_or(true))
-                .unwrap_or(true)
-            {
+            if self.settings.get_wireguard().is_none() {
                 log::info!("Generating new WireGuard key for account");
                 self.wireguard_key_manager
                     .spawn_key_generation_task(account, Some(FIRST_KEY_PUSH_TIMEOUT))
@@ -1959,23 +2206,9 @@ where
             .settings
             .get_account_token()
             .ok_or(Error::NoAccountToken)?;
+        let wireguard_data = self.settings.get_wireguard();
 
-        let mut account_entry = self
-            .account_history
-            .get(&account_token)
-            .await
-            .map_err(Error::AccountHistory)
-            .map(|data| {
-                data.unwrap_or_else(|| {
-                    log::error!("Account token set in settings but not in account history");
-                    account_history::AccountEntry {
-                        account: account_token.clone(),
-                        wireguard: None,
-                    }
-                })
-            })?;
-
-        let gen_result = match &account_entry.wireguard {
+        let gen_result = match &wireguard_data {
             Some(wireguard_data) => {
                 self.wireguard_key_manager
                     .replace_key(account_token.clone(), wireguard_data.get_public_key())
@@ -1991,21 +2224,20 @@ where
         match gen_result {
             Ok(new_data) => {
                 let public_key = new_data.get_public_key();
-                account_entry.wireguard = Some(new_data);
-                self.account_history
-                    .insert(account_entry)
+                self.settings
+                    .set_wireguard(Some(new_data))
                     .await
-                    .map_err(Error::AccountHistory)?;
+                    .map_err(Error::SettingsError)?;
                 if let Some(TunnelType::Wireguard) = self.get_target_tunnel_type() {
-                    self.reconnect_tunnel();
+                    self.schedule_reconnect(WG_RECONNECT_DELAY).await;
                 }
-                let keygen_event = KeygenEvent::NewKey(public_key);
+                let keygen_event = KeygenEvent::NewKey(public_key.clone());
                 self.event_listener.notify_key_event(keygen_event.clone());
 
                 // update automatic rotation
                 self.wireguard_key_manager
                     .set_rotation_interval(
-                        &mut self.account_history,
+                        public_key,
                         account_token,
                         self.settings.tunnel_options.wireguard.rotation_interval,
                     )
@@ -2019,17 +2251,11 @@ where
     }
 
     async fn on_get_wireguard_key(&mut self, tx: ResponseTx<Option<wireguard::PublicKey>, Error>) {
-        let token = self.settings.get_account_token();
-        let result = if let Some(token) = token {
-            let entry = self.account_history.get(&token).await;
-            match entry {
-                Ok(Some(entry)) => {
-                    let key = entry.wireguard.map(|wg| wg.get_public_key());
-                    Ok(key)
-                }
-                Ok(None) => Err(Error::NoAccountTokenHistory),
-                Err(error) => Err(Error::AccountHistory(error)),
-            }
+        let result = if self.settings.get_account_token().is_some() {
+            Ok(self
+                .settings
+                .get_wireguard()
+                .map(|data| data.get_public_key()))
         } else {
             Err(Error::NoAccountToken)
         };
@@ -2044,26 +2270,10 @@ where
                 return;
             }
         };
-
-        let key = self
-            .account_history
-            .get(&account)
-            .await
-            .map(|entry| entry.and_then(|e| e.wireguard.map(|wg| wg.private_key.public_key())));
-
-        let public_key = match key {
-            Ok(Some(public_key)) => public_key,
-            Ok(None) => {
+        let public_key = match self.settings.get_wireguard() {
+            Some(wg_data) => wg_data.private_key.public_key(),
+            None => {
                 Self::oneshot_send(tx, Ok(false), "verify_wireguard_key response");
-                return;
-            }
-            Err(e) => {
-                log::error!("Failed to read key data: {}", e);
-                Self::oneshot_send(
-                    tx,
-                    Err(Error::AccountHistory(e)),
-                    "verify_wireguard_key response",
-                );
                 return;
             }
         };

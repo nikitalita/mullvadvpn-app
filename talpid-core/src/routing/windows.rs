@@ -24,6 +24,9 @@ pub enum Error {
     /// Failure to clear routes
     #[error(display = "Failed to clear applied routes")]
     ClearRoutesFailed,
+    /// WinNet returned an error while adding default route callback
+    #[error(display = "Failed to set callback for default route")]
+    FailedToAddDefaultRouteCallback,
     /// Attempt to use route manager that has been dropped
     #[error(display = "Cannot send message to route manager since it is down")]
     RouteManagerDown,
@@ -33,7 +36,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Manages routes by calling into WinNet
 pub struct RouteManager {
-    callback_handles: Vec<winnet::WinNetCallbackHandle>,
     runtime: tokio::runtime::Handle,
     manage_tx: Option<UnboundedSender<RouteManagerCommand>>,
 }
@@ -41,20 +43,17 @@ pub struct RouteManager {
 /// Handle to a route manager.
 #[derive(Clone)]
 pub struct RouteManagerHandle {
-    runtime: tokio::runtime::Handle,
     tx: UnboundedSender<RouteManagerCommand>,
 }
 
 impl RouteManagerHandle {
     /// Applies the given routes while the route manager is running.
-    pub fn add_routes(&self, routes: HashSet<RequiredRoute>) -> Result<()> {
+    pub async fn add_routes(&self, routes: HashSet<RequiredRoute>) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
             .unbounded_send(RouteManagerCommand::AddRoutes(routes, response_tx))
             .map_err(|_| Error::RouteManagerDown)?;
-        self.runtime
-            .block_on(response_rx)
-            .map_err(|_| Error::ManagerChannelDown)?
+        response_rx.await.map_err(|_| Error::ManagerChannelDown)?
     }
 }
 
@@ -67,7 +66,7 @@ pub enum RouteManagerCommand {
 impl RouteManager {
     /// Creates a new route manager that will apply the provided routes and ensure they exist until
     /// it's stopped.
-    pub fn new(
+    pub async fn new(
         runtime: tokio::runtime::Handle,
         required_routes: HashSet<RequiredRoute>,
     ) -> Result<Self> {
@@ -76,12 +75,11 @@ impl RouteManager {
         }
         let (manage_tx, manage_rx) = mpsc::unbounded();
         let manager = Self {
-            callback_handles: vec![],
             runtime: runtime.clone(),
             manage_tx: Some(manage_tx),
         };
         runtime.spawn(RouteManager::listen(manage_rx));
-        manager.add_routes(required_routes)?;
+        manager.add_routes(required_routes).await?;
 
         Ok(manager)
     }
@@ -89,13 +87,15 @@ impl RouteManager {
     /// Retrieve a sender directly to the command channel.
     pub fn handle(&self) -> Result<RouteManagerHandle> {
         if let Some(tx) = &self.manage_tx {
-            Ok(RouteManagerHandle {
-                runtime: self.runtime.clone(),
-                tx: tx.clone(),
-            })
+            Ok(RouteManagerHandle { tx: tx.clone() })
         } else {
             Err(Error::RouteManagerDown)
         }
+    }
+
+    /// Retrieve handle for the tokio runtime.
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.clone()
     }
 
     async fn listen(mut manage_rx: UnboundedReceiver<RouteManagerCommand>) {
@@ -130,32 +130,16 @@ impl RouteManager {
     }
 
     /// Sets a callback that is called whenever the default route changes.
-    #[cfg(target_os = "windows")]
     pub fn add_default_route_callback<T: 'static>(
         &mut self,
         callback: Option<winnet::DefaultRouteChangedCallback>,
         context: T,
-    ) {
+    ) -> Result<winnet::WinNetCallbackHandle> {
         if self.manage_tx.is_none() {
-            return;
+            return Err(Error::RouteManagerDown);
         }
-
-        match winnet::add_default_route_change_callback(callback, context) {
-            Err(_e) => {
-                // not sure if this should panic
-                log::error!("Failed to add callback!");
-            }
-            Ok(handle) => {
-                self.callback_handles.push(handle);
-            }
-        }
-    }
-
-    /// Removes all routes previously applied in [`RouteManager::new`] or
-    /// [`RouteManager::add_routes`].
-    pub fn clear_default_route_callbacks(&mut self) {
-        // `WinNetCallbackHandle::drop` removes these callbacks.
-        self.callback_handles.clear();
+        winnet::add_default_route_change_callback(callback, context)
+            .map_err(|_| Error::FailedToAddDefaultRouteCallback)
     }
 
     /// Stops the routing manager and invalidates the route manager - no new default route callbacks
@@ -166,13 +150,12 @@ impl RouteManager {
                 log::error!("RouteManager channel already down or thread panicked");
             }
 
-            self.callback_handles.clear();
             winnet::deactivate_routing_manager();
         }
     }
 
     /// Applies the given routes until [`RouteManager::stop`] is called.
-    pub fn add_routes(&self, routes: HashSet<RequiredRoute>) -> Result<()> {
+    pub async fn add_routes(&self, routes: HashSet<RequiredRoute>) -> Result<()> {
         if let Some(tx) = &self.manage_tx {
             let (result_tx, result_rx) = oneshot::channel();
             if tx
@@ -181,9 +164,7 @@ impl RouteManager {
             {
                 return Err(Error::RouteManagerDown);
             }
-            self.runtime
-                .block_on(result_rx)
-                .map_err(|_| Error::ManagerChannelDown)?
+            result_rx.await.map_err(|_| Error::ManagerChannelDown)?
         } else {
             Err(Error::RouteManagerDown)
         }

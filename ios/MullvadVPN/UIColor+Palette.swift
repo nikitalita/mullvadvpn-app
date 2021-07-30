@@ -41,10 +41,17 @@ extension UIColor {
         static let disabledTitleColor = UIColor.lightGray
     }
 
+    enum Switch {
+        static let borderColor = UIColor(white: 1.0, alpha: 0.8)
+        static let onThumbColor = successColor
+        static let offThumbColor = dangerColor
+    }
+
     // Relay availability indicator view
     enum RelayStatusIndicator {
         static let activeColor = successColor.withAlphaComponent(0.9)
         static let inactiveColor = dangerColor.withAlphaComponent(0.95)
+        static let highlightColor = UIColor.white
     }
 
     enum MainSplitView {
@@ -74,12 +81,20 @@ extension UIColor {
         static let defaultBackgroundColor = primaryColor
         static let unsecuredBackgroundColor = dangerColor
         static let securedBackgroundColor = successColor
+        static let dividerColor = secondaryColor
+    }
+
+    enum InAppNotificationBanner {
+        static let errorIndicatorColor = dangerColor
+        static let successIndicatorColor = successColor
+        static let warningIndicatorColor = warningColor
     }
 
     // Common colors
     static let primaryColor = namedColor("Primary")
     static let secondaryColor = namedColor("Secondary")
     static let dangerColor = namedColor("Danger")
+    static let warningColor = namedColor("Warning")
     static let successColor = namedColor("Success")
 }
 

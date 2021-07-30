@@ -1,19 +1,26 @@
 import React, { useCallback, useContext, useState } from 'react';
+import { useSelector } from 'react-redux';
+import { sprintf } from 'sprintf-js';
 import { VoucherResponse } from '../../shared/daemon-rpc-types';
+import { formatRelativeDate } from '../../shared/date-helper';
 import { messages } from '../../shared/gettext';
-import { useScheduler } from '../../shared/scheduler';
 import { useAppContext } from '../context';
 import useActions from '../lib/actionsHook';
 import accountActions from '../redux/account/actions';
+import { IReduxState } from '../redux/store';
 import * as AppButton from './AppButton';
+import ImageView from './ImageView';
 import { ModalAlert } from './Modal';
 import {
   StyledEmptyResponse,
   StyledErrorResponse,
   StyledInput,
   StyledLabel,
+  StyledProgressResponse,
+  StyledProgressWrapper,
   StyledSpinner,
-  StyledSuccessResponse,
+  StyledStatusIcon,
+  StyledTitle,
 } from './RedeemVoucherStyles';
 
 const MIN_VOUCHER_LENGTH = 16;
@@ -60,7 +67,6 @@ interface IRedeemVoucherProps {
 export function RedeemVoucherContainer(props: IRedeemVoucherProps) {
   const { onSubmit, onSuccess, onFailure } = props;
 
-  const closeScheduler = useScheduler();
   const { submitVoucher } = useAppContext();
   const { updateAccountExpiry } = useActions(accountActions);
 
@@ -75,18 +81,21 @@ export function RedeemVoucherContainer(props: IRedeemVoucherProps) {
       return;
     }
 
+    const submitTimestamp = Date.now();
     setSubmitting(true);
     onSubmit?.();
     const response = await submitVoucher(value);
 
+    // Show the spinner for at least half a second if it isn't successful.
+    const submitDuration = Date.now() - submitTimestamp;
+    if (response.type !== 'success' && submitDuration < 500) {
+      await new Promise((resolve) => setTimeout(resolve, 500 - submitDuration));
+    }
+
     setSubmitting(false);
     setResponse(response);
     if (response.type === 'success') {
-      setValue('');
-      closeScheduler.schedule(() => {
-        updateAccountExpiry(response.newExpiry);
-        onSuccess?.();
-      }, 1000);
+      onSuccess?.();
     } else {
       onFailure?.();
     }
@@ -100,7 +109,11 @@ export function RedeemVoucherContainer(props: IRedeemVoucherProps) {
   );
 }
 
-export function RedeemVoucherInput() {
+interface IRedeemVoucherInputProps {
+  className?: string;
+}
+
+export function RedeemVoucherInput(props: IRedeemVoucherInputProps) {
   const { value, setValue, onSubmit, submitting, response } = useContext(RedeemVoucherContext);
   const disabled = submitting || response?.type === 'success';
 
@@ -122,6 +135,7 @@ export function RedeemVoucherInput() {
 
   return (
     <StyledInput
+      className={props.className}
       allowedCharacters="[A-Z0-9]"
       separator="-"
       uppercaseOnly
@@ -141,17 +155,22 @@ export function RedeemVoucherResponse() {
   const { response, submitting } = useContext(RedeemVoucherContext);
 
   if (submitting) {
-    return <StyledSpinner source="icon-spinner" height={20} width={20} />;
+    return (
+      <>
+        <StyledProgressWrapper>
+          <StyledSpinner source="icon-spinner" height={20} width={20} />
+          <StyledProgressResponse>
+            {messages.pgettext('redeem-voucher-view', 'Verifying voucher...')}
+          </StyledProgressResponse>
+        </StyledProgressWrapper>
+      </>
+    );
   }
 
   if (response) {
     switch (response.type) {
       case 'success':
-        return (
-          <StyledSuccessResponse>
-            {messages.pgettext('redeem-voucher-view', 'Voucher was successfully redeemed.')}
-          </StyledSuccessResponse>
-        );
+        return <StyledEmptyResponse />;
       case 'invalid':
         return (
           <StyledErrorResponse>
@@ -193,22 +212,52 @@ interface IRedeemVoucherAlertProps {
 
 export function RedeemVoucherAlert(props: IRedeemVoucherAlertProps) {
   const { submitting, response } = useContext(RedeemVoucherContext);
-  const cancelDisabled = submitting || response?.type === 'success';
+  const accountData = useSelector((state: IReduxState) => state.account);
 
-  return (
-    <ModalAlert
-      buttons={[
-        <RedeemVoucherSubmitButton key="submit" />,
-        <AppButton.BlueButton key="cancel" disabled={cancelDisabled} onClick={props.onClose}>
-          {messages.pgettext('redeem-voucher-alert', 'Cancel')}
-        </AppButton.BlueButton>,
-      ]}
-      close={props.onClose}>
-      <StyledLabel>{messages.pgettext('redeem-voucher-alert', 'Enter voucher code')}</StyledLabel>
-      <RedeemVoucherInput />
-      <RedeemVoucherResponse />
-    </ModalAlert>
-  );
+  const duration =
+    (accountData.expiry &&
+      accountData.previousExpiry &&
+      formatRelativeDate(accountData.expiry, accountData.previousExpiry)) ??
+    '';
+
+  if (response?.type === 'success') {
+    return (
+      <ModalAlert
+        buttons={[
+          <AppButton.BlueButton key="gotit" onClick={props.onClose}>
+            {messages.gettext('Got it!')}
+          </AppButton.BlueButton>,
+        ]}
+        close={props.onClose}>
+        <StyledStatusIcon>
+          <ImageView source="icon-success" height={60} width={60} />
+        </StyledStatusIcon>
+        <StyledTitle>
+          {messages.pgettext('redeem-voucher-view', 'Voucher was successfully redeemed.')}
+        </StyledTitle>
+        <StyledLabel>
+          {sprintf(messages.gettext('%(duration)s was added to your account.'), {
+            duration,
+          })}
+        </StyledLabel>
+      </ModalAlert>
+    );
+  } else {
+    return (
+      <ModalAlert
+        buttons={[
+          <RedeemVoucherSubmitButton key="submit" />,
+          <AppButton.BlueButton key="cancel" disabled={submitting} onClick={props.onClose}>
+            {messages.pgettext('redeem-voucher-alert', 'Cancel')}
+          </AppButton.BlueButton>,
+        ]}
+        close={props.onClose}>
+        <StyledLabel>{messages.pgettext('redeem-voucher-alert', 'Enter voucher code')}</StyledLabel>
+        <RedeemVoucherInput />
+        <RedeemVoucherResponse />
+      </ModalAlert>
+    );
+  }
 }
 
 interface IRedeemVoucherButtonProps {
@@ -227,7 +276,7 @@ export function RedeemVoucherButton(props: IRedeemVoucherButtonProps) {
         {messages.pgettext('redeem-voucher-alert', 'Redeem voucher')}
       </AppButton.GreenButton>
       {showAlert && (
-        <RedeemVoucherContainer onSuccess={onClose}>
+        <RedeemVoucherContainer>
           <RedeemVoucherAlert onClose={onClose} />
         </RedeemVoucherContainer>
       )}

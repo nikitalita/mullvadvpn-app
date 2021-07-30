@@ -1,23 +1,25 @@
 import { closeToExpiry, hasExpired } from '../shared/account-expiry';
-import { AccountToken, IAccountData } from '../shared/daemon-rpc-types';
+import { AccountToken, IAccountData, VoucherResponse } from '../shared/daemon-rpc-types';
 import { DateComponent, dateByAddingComponent } from '../shared/date-helper';
 import log from '../shared/logging';
-import consumePromise from '../shared/promise';
 import { Scheduler } from '../shared/scheduler';
 import { InvalidAccountError } from './errors';
-
-const EXPIRED_ACCOUNT_REFRESH_PERIOD = 60_000;
 
 interface IAccountFetchWatcher {
   onFinish: () => void;
   onError: (error: Error) => void;
 }
 
+// Account data is valid for 1 minute unless the account has expired.
+const ACCOUNT_DATA_VALIDITY_SECONDS = 60_000;
+// Account data is valid for 10 seconds if the account has expired.
+const ACCOUNT_DATA_EXPIRED_VALIDITY_SECONDS = 10_000;
+
 // An account data cache that helps to throttle RPC requests to get_account_data and retain the
 // cached value for 1 minute.
 export default class AccountDataCache {
   private currentAccount?: AccountToken;
-  private expiresAt?: Date;
+  private validUntil?: Date;
   private performingFetch = false;
   private waitStrategy = new WaitStrategy();
   private fetchRetryScheduler = new Scheduler();
@@ -36,7 +38,7 @@ export default class AccountDataCache {
     }
 
     // Only fetch if value has expired
-    if (this.isExpired()) {
+    if (!this.isValid()) {
       if (watcher) {
         this.watchers.push(watcher);
       }
@@ -47,7 +49,7 @@ export default class AccountDataCache {
 
       // Only fetch if there's no fetch for this account number in progress.
       if (!this.performingFetch) {
-        consumePromise(this.performFetch(accountToken));
+        void this.performFetch(accountToken);
       }
     } else if (watcher) {
       watcher.onFinish();
@@ -59,21 +61,35 @@ export default class AccountDataCache {
     this.waitStrategy.reset();
 
     this.performingFetch = false;
-    this.expiresAt = undefined;
+    this.validUntil = undefined;
     this.updateHandler();
     this.notifyWatchers((watcher) => {
       watcher.onError(new Error('Cancelled'));
     });
   }
 
-  private setValue(value: IAccountData) {
-    this.expiresAt = new Date(Date.now() + 60 * 1000); // 60s expiration
-    this.updateHandler(value);
+  public handleVoucherResponse(accountToken: AccountToken, voucherResponse: VoucherResponse) {
+    if (accountToken === this.currentAccount && voucherResponse.type === 'success') {
+      this.setValue({ expiry: voucherResponse.newExpiry });
+    }
+  }
+
+  private setValue(accountData: IAccountData) {
+    this.validUntil = this.getValidUntil(accountData);
+    this.updateHandler(accountData);
     this.notifyWatchers((watcher) => watcher.onFinish());
   }
 
-  private isExpired() {
-    return !this.expiresAt || this.expiresAt < new Date();
+  private isValid() {
+    return this.validUntil && this.validUntil > new Date();
+  }
+
+  private getValidUntil(accountData: IAccountData): Date {
+    if (hasExpired(accountData.expiry)) {
+      return new Date(Date.now() + ACCOUNT_DATA_EXPIRED_VALIDITY_SECONDS);
+    } else {
+      return new Date(Date.now() + ACCOUNT_DATA_VALIDITY_SECONDS);
+    }
   }
 
   private async performFetch(accountToken: AccountToken) {
@@ -107,9 +123,7 @@ export default class AccountDataCache {
     const currentDate = new Date();
     const oneMinuteBeforeExpiry = dateByAddingComponent(accountExpiry, DateComponent.minute, -1);
 
-    if (hasExpired(accountExpiry)) {
-      return EXPIRED_ACCOUNT_REFRESH_PERIOD;
-    } else if (oneMinuteBeforeExpiry >= currentDate && closeToExpiry(accountExpiry)) {
+    if (oneMinuteBeforeExpiry >= currentDate && closeToExpiry(accountExpiry)) {
       return oneMinuteBeforeExpiry.getTime() - currentDate.getTime();
     } else {
       return undefined;
@@ -134,7 +148,7 @@ export default class AccountDataCache {
 
   private scheduleFetch(accountToken: AccountToken, delay: number) {
     this.fetchRetryScheduler.schedule(() => {
-      consumePromise(this.performFetch(accountToken));
+      void this.performFetch(accountToken);
     }, delay);
   }
 
