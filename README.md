@@ -31,11 +31,11 @@ security.
 |-------------|--------------------|
 | Windows     | 7, 8.1 and 10      |
 | macOS       | The three latest major releases |
-| Linux (Ubuntu)| The two newest LTS releases and the two newest non-LTS releases |
+| Linux (Ubuntu)| The two latest LTS releases and the latest non-LTS releases |
 | Linux (Fedora) | The versions that are not yet [EOL](https://fedoraproject.org/wiki/End_of_life) |
 | Linux (Debian) | The versions that are not yet [EOL](https://wiki.debian.org/DebianReleases) |
 | Android | The four latest major releases|
-| iOS         | 13 and newer       |
+| iOS         | 12 and newer       |
 
 On Linux we test using the Gnome desktop environment. The app should, and probably does work
 in other DEs, but we don't regularly test those.
@@ -50,6 +50,9 @@ state of latest master, not necessarily any existing release.
 | OpenVPN                       |    ✓    |   ✓   |   ✓   |         |     |
 | WireGuard                     |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
 | OpenVPN over Shadowsocks      |    ✓    |   ✓   |   ✓   |         |     |
+| Split tunneling               |    ✓    |   ✓   |       |    ✓    |     |
+| Custom DNS server             |    ✓    |   ✓   |   ✓   |    ✓    |     |
+| Ad and tracker blocking       |    ✓    |   ✓   |   ✓   |         |  ✓  |
 | Optional local network access |    ✓    |   ✓   |   ✓   |    ✓    |  ✓\* |
 
 \* The local network is always accessible on iOS with the current implementation
@@ -537,6 +540,8 @@ to do that before starting the GUI.
 
 1. `MULLVAD_PATH` - Allows changing the path to the folder with the `mullvad-problem-report` tool
     when running in development mode. Defaults to: `<repo>/target/debug/`.
+2. `MULLVAD_DISABLE_UPDATE_NOTIFICATION` - If set to `1`, GUI notification will be disabled when
+    an update is available.
 
 
 ## Making a release

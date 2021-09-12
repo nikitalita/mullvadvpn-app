@@ -71,6 +71,10 @@ impl<T: fmt::Debug + Clone + Eq + PartialEq> Constraint<T> {
         }
     }
 
+    pub fn is_only(&self) -> bool {
+        !self.is_any()
+    }
+
     pub fn as_ref(&self) -> Constraint<&T> {
         match self {
             Constraint::Any => Constraint::Any,
@@ -176,13 +180,12 @@ impl RelaySettings {
                 if constraints.tunnel_protocol == Constraint::Only(TunnelType::Wireguard) {
                     constraints.tunnel_protocol = Constraint::Any;
                 }
-                if constraints.openvpn_constraints.protocol
-                    == Constraint::Only(TransportProtocol::Udp)
+                if let Constraint::Only(TransportPort {
+                    protocol: TransportProtocol::Udp,
+                    ..
+                }) = constraints.openvpn_constraints.port
                 {
-                    constraints.openvpn_constraints = OpenVpnConstraints {
-                        protocol: Constraint::Any,
-                        port: Constraint::Any,
-                    }
+                    constraints.openvpn_constraints.port = Constraint::Any;
                 }
             }
             RelaySettings::CustomTunnelEndpoint(config) => {
@@ -445,30 +448,45 @@ impl Match<WireguardEndpointData> for TunnelConstraints {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
+pub struct TransportPort {
+    pub protocol: TransportProtocol,
+    pub port: Constraint<u16>,
+}
+
 /// [`Constraint`]s applicable to OpenVPN relay servers.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct OpenVpnConstraints {
-    pub port: Constraint<u16>,
-    pub protocol: Constraint<TransportProtocol>,
+    pub port: Constraint<TransportPort>,
 }
 
 impl fmt::Display for OpenVpnConstraints {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self.port {
-            Constraint::Any => write!(f, "any port")?,
-            Constraint::Only(port) => write!(f, "port {}", port)?,
-        }
-        write!(f, " over ")?;
-        match self.protocol {
-            Constraint::Any => write!(f, "any protocol"),
-            Constraint::Only(protocol) => write!(f, "{}", protocol),
+            Constraint::Any => write!(f, "any port"),
+            Constraint::Only(port) => {
+                match port.port {
+                    Constraint::Any => write!(f, "any port")?,
+                    Constraint::Only(port) => write!(f, "port {}", port)?,
+                }
+                write!(f, " over {}", port.protocol)
+            }
         }
     }
 }
 
 impl Match<OpenVpnEndpointData> for OpenVpnConstraints {
     fn matches(&self, endpoint: &OpenVpnEndpointData) -> bool {
-        self.port.matches_eq(&endpoint.port) && self.protocol.matches_eq(&endpoint.protocol)
+        match self.port {
+            Constraint::Any => true,
+            Constraint::Only(transport_port) => {
+                transport_port.protocol == endpoint.protocol
+                    && match transport_port.port {
+                        Constraint::Any => true,
+                        Constraint::Only(port) => port == endpoint.port,
+                    }
+            }
+        }
     }
 }
 
@@ -476,7 +494,7 @@ impl Match<OpenVpnEndpointData> for OpenVpnConstraints {
 #[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WireguardConstraints {
-    pub port: Constraint<u16>,
+    pub port: Constraint<TransportPort>,
     pub ip_version: Constraint<IpVersion>,
     pub entry_location: Option<Constraint<LocationConstraint>>,
 }
@@ -485,7 +503,13 @@ impl fmt::Display for WireguardConstraints {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self.port {
             Constraint::Any => write!(f, "any port")?,
-            Constraint::Only(port) => write!(f, "port {}", port)?,
+            Constraint::Only(port) => {
+                match port.port {
+                    Constraint::Any => write!(f, "any port")?,
+                    Constraint::Only(port) => write!(f, "port {}", port)?,
+                }
+                write!(f, " over {}", port.protocol)?;
+            }
         }
         write!(f, " over ")?;
         match self.ip_version {
@@ -504,10 +528,16 @@ impl Match<WireguardEndpointData> for WireguardConstraints {
     fn matches(&self, endpoint: &WireguardEndpointData) -> bool {
         match self.port {
             Constraint::Any => true,
-            Constraint::Only(port) => endpoint
-                .port_ranges
-                .iter()
-                .any(|range| (port >= range.0 && port <= range.1)),
+            Constraint::Only(transport_port) => {
+                transport_port.protocol == endpoint.protocol
+                    && match transport_port.port {
+                        Constraint::Any => true,
+                        Constraint::Only(port) => endpoint
+                            .port_ranges
+                            .iter()
+                            .any(|range| (port >= range.0 && port <= range.1)),
+                    }
+            }
         }
     }
 }
@@ -595,7 +625,11 @@ impl RelaySettingsUpdate {
                 if let Some(Constraint::Only(TunnelType::Wireguard)) = &update.tunnel_protocol {
                     false
                 } else if let Some(constraints) = &update.openvpn_constraints {
-                    if let Constraint::Only(TransportProtocol::Udp) = &constraints.protocol {
+                    if let Constraint::Only(TransportPort {
+                        protocol: TransportProtocol::Udp,
+                        ..
+                    }) = &constraints.port
+                    {
                         false
                     } else {
                         true

@@ -20,26 +20,28 @@ impl super::SettingsMigration for Migration {
         }();
 
         if let Some(options) = dns_options {
-            let new_state = if options
-                .get("custom")
-                .map(|custom| custom.as_bool().unwrap_or(false))
-                .unwrap_or(false)
-            {
-                DnsState::Custom
-            } else {
-                DnsState::Default
-            };
-            let addresses = if let Some(addrs) = options.get("addresses") {
-                serde_json::from_value(addrs.clone()).map_err(Error::ParseError)?
-            } else {
-                vec![]
-            };
+            if options.get("state").is_none() {
+                let new_state = if options
+                    .get("custom")
+                    .map(|custom| custom.as_bool().unwrap_or(false))
+                    .unwrap_or(false)
+                {
+                    DnsState::Custom
+                } else {
+                    DnsState::Default
+                };
+                let addresses = if let Some(addrs) = options.get("addresses") {
+                    serde_json::from_value(addrs.clone()).map_err(Error::ParseError)?
+                } else {
+                    vec![]
+                };
 
-            settings["tunnel_options"]["dns_options"] = serde_json::json!(DnsOptions {
-                state: new_state,
-                default_options: DefaultDnsOptions::default(),
-                custom_options: CustomDnsOptions { addresses },
-            });
+                settings["tunnel_options"]["dns_options"] = serde_json::json!(DnsOptions {
+                    state: new_state,
+                    default_options: DefaultDnsOptions::default(),
+                    custom_options: CustomDnsOptions { addresses },
+                });
+            }
         }
 
         settings["settings_version"] = serde_json::json!(SettingsVersion::V4);
@@ -50,7 +52,7 @@ impl super::SettingsMigration for Migration {
 
 #[cfg(test)]
 mod test {
-    use super::super::try_migrate_settings;
+    use super::{super::SettingsMigration, Migration};
     use serde_json;
 
     pub const V3_SETTINGS: &str = r#"
@@ -69,7 +71,7 @@ mod test {
       },
       "openvpn_constraints": {
         "port": {
-          "only": 53
+          "only": 1195
         },
         "protocol": {
           "only": "udp"
@@ -112,7 +114,7 @@ mod test {
 }
 "#;
 
-    pub const NEW_SETTINGS: &str = r#"
+    pub const V4_SETTINGS: &str = r#"
 {
   "account_token": "1234",
   "relay_settings": {
@@ -128,7 +130,7 @@ mod test {
       },
       "openvpn_constraints": {
         "port": {
-          "only": 53
+          "only": 1195
         },
         "protocol": {
           "only": "udp"
@@ -180,10 +182,14 @@ mod test {
 
     #[test]
     fn test_v3_migration() {
-        let migrated_settings =
-            try_migrate_settings(V3_SETTINGS.as_bytes()).expect("Migration failed");
-        let new_settings = serde_json::from_str(NEW_SETTINGS).unwrap();
+        let mut old_settings = serde_json::from_str(V3_SETTINGS).unwrap();
 
-        assert_eq!(&migrated_settings, &new_settings);
+        let migration = Migration;
+        assert!(migration.version_matches(&mut old_settings));
+
+        migration.migrate(&mut old_settings).unwrap();
+        let new_settings: serde_json::Value = serde_json::from_str(V4_SETTINGS).unwrap();
+
+        assert_eq!(&old_settings, &new_settings);
     }
 }

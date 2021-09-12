@@ -1,36 +1,20 @@
 import * as React from 'react';
 import { sprintf } from 'sprintf-js';
-import { colors } from '../../config.json';
-import {
-  BridgeState,
-  IDnsOptions,
-  RelayProtocol,
-  TunnelProtocol,
-} from '../../shared/daemon-rpc-types';
+import { TunnelProtocol } from '../../shared/daemon-rpc-types';
 import { messages } from '../../shared/gettext';
-import { IpAddress } from '../lib/ip';
 import { WgKeyState } from '../redux/settings/reducers';
 import {
-  StyledButtonCellGroup,
-  StyledContainer,
-  StyledInputFrame,
   StyledNavigationScrollbars,
   StyledNoWireguardKeyError,
   StyledNoWireguardKeyErrorContainer,
-  StyledSelectorContainer,
   StyledSelectorForFooter,
   StyledTunnelProtocolContainer,
-  StyledCustomDnsSwitchContainer,
-  StyledCustomDnsFooter,
-  StyledAddCustomDnsLabel,
-  StyledAddCustomDnsButton,
-  StyledBetaLabel,
 } from './AdvancedSettingsStyles';
 import * as AppButton from './AppButton';
 import { AriaDescription, AriaInput, AriaInputGroup, AriaLabel } from './AriaGroup';
 import * as Cell from './cell';
-import CellList, { ICellListItem } from './cell/List';
-import { Layout } from './Layout';
+import CustomDnsSettings from './CustomDnsSettings';
+import { Layout, SettingsContainer } from './Layout';
 import { ModalAlert, ModalAlertType, ModalContainer, ModalMessage } from './Modal';
 import {
   BackBarItem,
@@ -39,127 +23,33 @@ import {
   NavigationItems,
   TitleBarItem,
 } from './NavigationBar';
-import Selector, { ISelectorItem } from './cell/Selector';
+import { ISelectorItem } from './cell/Selector';
 import SettingsHeader, { HeaderTitle } from './SettingsHeader';
-import Accordion from './Accordion';
-import { formatMarkdown } from '../markdown-formatter';
 
-const MIN_MSSFIX_VALUE = 1000;
-const MAX_MSSFIX_VALUE = 1450;
-const MIN_WIREGUARD_MTU_VALUE = 1280;
-const MAX_WIREGUARD_MTU_VALUE = 1420;
-const UDP_PORTS = [1194, 1195, 1196, 1197, 1300, 1301, 1302];
-const TCP_PORTS = [80, 443];
-const WIREUGARD_UDP_PORTS = [51820, 53];
-
-type OptionalPort = number | undefined;
-
-type OptionalRelayProtocol = RelayProtocol | undefined;
 type OptionalTunnelProtocol = TunnelProtocol | undefined;
-
-function mapPortToSelectorItem(value: number): ISelectorItem<number> {
-  return { label: value.toString(), value };
-}
 
 interface IProps {
   enableIpv6: boolean;
   blockWhenDisconnected: boolean;
   tunnelProtocol?: TunnelProtocol;
-  openvpn: {
-    protocol?: RelayProtocol;
-    port?: number;
-  };
   wireguardKeyState: WgKeyState;
-  wireguard: { port?: number };
-  mssfix?: number;
-  wireguardMtu?: number;
-  bridgeState: BridgeState;
-  dns: IDnsOptions;
-  setBridgeState: (value: BridgeState) => void;
   setEnableIpv6: (value: boolean) => void;
   setBlockWhenDisconnected: (value: boolean) => void;
   setTunnelProtocol: (value: OptionalTunnelProtocol) => void;
-  setOpenVpnMssfix: (value: number | undefined) => void;
-  setWireguardMtu: (value: number | undefined) => void;
-  setOpenVpnRelayProtocolAndPort: (protocol?: RelayProtocol, port?: number) => void;
-  setWireguardRelayPort: (port?: number) => void;
-  setDnsOptions: (dns: IDnsOptions) => Promise<void>;
-  onViewWireguardKeys: () => void;
+  onViewWireguardSettings: () => void;
+  onViewOpenVpnSettings: () => void;
   onViewSplitTunneling: () => void;
   onClose: () => void;
 }
 
 interface IState {
   showConfirmBlockWhenDisconnectedAlert: boolean;
-  showAddCustomDns: boolean;
-  invalidDnsIp: boolean;
-  publicDnsIpToConfirm?: string;
 }
 
 export default class AdvancedSettings extends React.Component<IProps, IState> {
   public state = {
     showConfirmBlockWhenDisconnectedAlert: false,
-    showAddCustomDns: false,
-    invalidDnsIp: false,
-    publicDnsIpToConfirm: undefined,
   };
-
-  private customDnsSwitchRef = React.createRef<HTMLDivElement>();
-  private customDnsAddButtonRef = React.createRef<HTMLButtonElement>();
-  private customDnsInputContainerRef = React.createRef<HTMLDivElement>();
-
-  private portItems: { [key in RelayProtocol]: Array<ISelectorItem<OptionalPort>> };
-  private protocolItems: Array<ISelectorItem<OptionalRelayProtocol>>;
-  private bridgeStateItems: Array<ISelectorItem<BridgeState>>;
-  private wireguardPortItems: Array<ISelectorItem<OptionalPort>>;
-
-  constructor(props: IProps) {
-    super(props);
-
-    const automaticPort: ISelectorItem<OptionalPort> = {
-      label: messages.pgettext('advanced-settings-view', 'Automatic'),
-      value: undefined,
-    };
-
-    this.portItems = {
-      udp: [automaticPort].concat(UDP_PORTS.map(mapPortToSelectorItem)),
-      tcp: [automaticPort].concat(TCP_PORTS.map(mapPortToSelectorItem)),
-    };
-
-    this.wireguardPortItems = [automaticPort].concat(
-      WIREUGARD_UDP_PORTS.map(mapPortToSelectorItem),
-    );
-
-    this.protocolItems = [
-      {
-        label: messages.pgettext('advanced-settings-view', 'Automatic'),
-        value: undefined,
-      },
-      {
-        label: messages.pgettext('advanced-settings-view', 'TCP'),
-        value: 'tcp',
-      },
-      {
-        label: messages.pgettext('advanced-settings-view', 'UDP'),
-        value: 'udp',
-      },
-    ];
-
-    this.bridgeStateItems = [
-      {
-        label: messages.pgettext('advanced-settings-view', 'Automatic'),
-        value: 'auto',
-      },
-      {
-        label: messages.pgettext('advanced-settings-view', 'On'),
-        value: 'on',
-      },
-      {
-        label: messages.pgettext('advanced-settings-view', 'Off'),
-        value: 'off',
-      },
-    ];
-  }
 
   public render() {
     const hasWireguardKey = this.props.wireguardKeyState.type === 'key-set';
@@ -167,7 +57,7 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
     return (
       <ModalContainer>
         <Layout>
-          <StyledContainer>
+          <SettingsContainer>
             <NavigationContainer>
               <NavigationBar>
                 <NavigationItems>
@@ -245,6 +135,17 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
                   </Cell.Footer>
                 </AriaInputGroup>
 
+                {(window.env.platform === 'linux' || window.env.platform === 'win32') && (
+                  <Cell.CellButtonGroup>
+                    <Cell.CellButton onClick={this.props.onViewSplitTunneling}>
+                      <Cell.Label>
+                        {messages.pgettext('advanced-settings-view', 'Split tunneling')}
+                      </Cell.Label>
+                      <Cell.Icon height={12} width={7} source="icon-chevron" />
+                    </Cell.CellButton>
+                  </Cell.CellButtonGroup>
+                )}
+
                 <AriaInputGroup>
                   <StyledTunnelProtocolContainer>
                     <StyledSelectorForFooter
@@ -268,416 +169,61 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
                   </StyledTunnelProtocolContainer>
                 </AriaInputGroup>
 
-                {this.props.tunnelProtocol !== 'wireguard' ? (
-                  <AriaInputGroup>
-                    <StyledSelectorContainer>
-                      <Selector
-                        title={messages.pgettext(
-                          'advanced-settings-view',
-                          'OpenVPN transport protocol',
-                        )}
-                        values={this.protocolItems}
-                        value={this.props.openvpn.protocol}
-                        onSelect={this.onSelectOpenvpnProtocol}
-                      />
-
-                      {this.props.openvpn.protocol ? (
-                        <Selector
-                          title={sprintf(
-                            // TRANSLATORS: The title for the port selector section.
-                            // TRANSLATORS: Available placeholders:
-                            // TRANSLATORS: %(portType)s - a selected protocol (either TCP or UDP)
-                            messages.pgettext(
-                              'advanced-settings-view',
-                              'OpenVPN %(portType)s port',
-                            ),
-                            {
-                              portType: this.props.openvpn.protocol.toUpperCase(),
-                            },
-                          )}
-                          values={this.portItems[this.props.openvpn.protocol]}
-                          value={this.props.openvpn.port}
-                          onSelect={this.onSelectOpenVpnPort}
-                        />
-                      ) : undefined}
-                    </StyledSelectorContainer>
-                  </AriaInputGroup>
-                ) : undefined}
-
-                {this.props.tunnelProtocol === 'wireguard' ? (
-                  <AriaInputGroup>
-                    <StyledSelectorContainer>
-                      <StyledSelectorForFooter
-                        // TRANSLATORS: The title for the shadowsocks bridge selector section.
-                        title={messages.pgettext('advanced-settings-view', 'WireGuard port')}
-                        values={this.wireguardPortItems}
-                        value={this.props.wireguard.port}
-                        onSelect={this.onSelectWireguardPort}
-                      />
-                    </StyledSelectorContainer>
-                    <Cell.Footer>
-                      <AriaDescription>
-                        <Cell.FooterText>
-                          {
-                            // TRANSLATORS: The hint displayed below the WireGuard port selector.
-                            messages.pgettext(
-                              'advanced-settings-view',
-                              'The automatic setting will randomly choose from a wide range of ports.',
-                            )
-                          }
-                        </Cell.FooterText>
-                      </AriaDescription>
-                    </Cell.Footer>
-                  </AriaInputGroup>
-                ) : undefined}
-
-                <AriaInputGroup>
-                  <Selector
-                    title={
-                      // TRANSLATORS: The title for the shadowsocks bridge selector section.
-                      messages.pgettext('advanced-settings-view', 'Bridge mode')
-                    }
-                    values={this.bridgeStateItems}
-                    value={this.props.bridgeState}
-                    onSelect={this.onSelectBridgeState}
-                  />
-                </AriaInputGroup>
-
-                <AriaInputGroup>
-                  <Cell.Container>
-                    <AriaLabel>
-                      <Cell.InputLabel>
-                        {messages.pgettext('advanced-settings-view', 'OpenVPN Mssfix')}
-                      </Cell.InputLabel>
-                    </AriaLabel>
-                    <StyledInputFrame>
-                      <AriaInput>
-                        <Cell.AutoSizingTextInput
-                          value={this.props.mssfix ? this.props.mssfix.toString() : ''}
-                          inputMode={'numeric'}
-                          maxLength={4}
-                          placeholder={messages.pgettext('advanced-settings-view', 'Default')}
-                          onSubmitValue={this.onMssfixSubmit}
-                          validateValue={AdvancedSettings.mssfixIsValid}
-                          submitOnBlur={true}
-                          modifyValue={AdvancedSettings.removeNonNumericCharacters}
-                        />
-                      </AriaInput>
-                    </StyledInputFrame>
-                  </Cell.Container>
-                  <Cell.Footer>
-                    <AriaDescription>
-                      <Cell.FooterText>
-                        {sprintf(
-                          // TRANSLATORS: The hint displayed below the Mssfix input field.
-                          // TRANSLATORS: Available placeholders:
-                          // TRANSLATORS: %(max)d - the maximum possible mssfix value
-                          // TRANSLATORS: %(min)d - the minimum possible mssfix value
-                          messages.pgettext(
-                            'advanced-settings-view',
-                            'Set OpenVPN MSS value. Valid range: %(min)d - %(max)d.',
-                          ),
-                          {
-                            min: MIN_MSSFIX_VALUE,
-                            max: MAX_MSSFIX_VALUE,
-                          },
-                        )}
-                      </Cell.FooterText>
-                    </AriaDescription>
-                  </Cell.Footer>
-                </AriaInputGroup>
-
-                <AriaInputGroup>
-                  <Cell.Container>
-                    <AriaLabel>
-                      <Cell.InputLabel>
-                        {messages.pgettext('advanced-settings-view', 'WireGuard MTU')}
-                      </Cell.InputLabel>
-                    </AriaLabel>
-                    <StyledInputFrame>
-                      <AriaInput>
-                        <Cell.AutoSizingTextInput
-                          value={this.props.wireguardMtu ? this.props.wireguardMtu.toString() : ''}
-                          inputMode={'numeric'}
-                          maxLength={4}
-                          placeholder={messages.pgettext('advanced-settings-view', 'Default')}
-                          onSubmitValue={this.onWireguardMtuSubmit}
-                          validateValue={AdvancedSettings.wireguarMtuIsValid}
-                          submitOnBlur={true}
-                          modifyValue={AdvancedSettings.removeNonNumericCharacters}
-                        />
-                      </AriaInput>
-                    </StyledInputFrame>
-                  </Cell.Container>
-                  <Cell.Footer>
-                    <AriaDescription>
-                      <Cell.FooterText>
-                        {sprintf(
-                          // TRANSLATORS: The hint displayed below the WireGuard MTU input field.
-                          // TRANSLATORS: Available placeholders:
-                          // TRANSLATORS: %(max)d - the maximum possible wireguard mtu value
-                          // TRANSLATORS: %(min)d - the minimum possible wireguard mtu value
-                          messages.pgettext(
-                            'advanced-settings-view',
-                            'Set WireGuard MTU value. Valid range: %(min)d - %(max)d.',
-                          ),
-                          {
-                            min: MIN_WIREGUARD_MTU_VALUE,
-                            max: MAX_WIREGUARD_MTU_VALUE,
-                          },
-                        )}
-                      </Cell.FooterText>
-                    </AriaDescription>
-                  </Cell.Footer>
-                </AriaInputGroup>
-
-                <StyledButtonCellGroup>
-                  <Cell.CellButton onClick={this.props.onViewWireguardKeys}>
+                <Cell.CellButtonGroup>
+                  <Cell.CellButton
+                    onClick={this.props.onViewWireguardSettings}
+                    disabled={this.props.tunnelProtocol === 'openvpn'}>
                     <Cell.Label>
-                      {messages.pgettext('advanced-settings-view', 'WireGuard key')}
+                      {messages.pgettext('advanced-settings-view', 'WireGuard settings')}
                     </Cell.Label>
                     <Cell.Icon height={12} width={7} source="icon-chevron" />
                   </Cell.CellButton>
-                </StyledButtonCellGroup>
 
-                {(window.env.platform === 'linux' || window.env.platform === 'win32') && (
-                  <StyledButtonCellGroup>
-                    <Cell.CellButton onClick={this.props.onViewSplitTunneling}>
-                      <Cell.Label>
-                        {window.env.platform === 'win32' && <StyledBetaLabel />}
-                        {messages.pgettext('advanced-settings-view', 'Split tunneling')}
-                      </Cell.Label>
-                      <Cell.Icon height={12} width={7} source="icon-chevron" />
-                    </Cell.CellButton>
-                  </StyledButtonCellGroup>
-                )}
+                  <Cell.CellButton
+                    onClick={this.props.onViewOpenVpnSettings}
+                    disabled={this.props.tunnelProtocol === 'wireguard'}>
+                    <Cell.Label>
+                      {messages.pgettext('advanced-settings-view', 'OpenVPN settings')}
+                    </Cell.Label>
+                    <Cell.Icon height={12} width={7} source="icon-chevron" />
+                  </Cell.CellButton>
+                </Cell.CellButtonGroup>
 
-                <StyledCustomDnsSwitchContainer disabled={!this.customDnsAvailable()}>
-                  <AriaInputGroup>
-                    <AriaLabel>
-                      <Cell.InputLabel>
-                        {messages.pgettext('advanced-settings-view', 'Use custom DNS server')}
-                      </Cell.InputLabel>
-                    </AriaLabel>
-                    <AriaInput>
-                      <Cell.Switch
-                        ref={this.customDnsSwitchRef}
-                        isOn={this.props.dns.state === 'custom' || this.state.showAddCustomDns}
-                        onChange={this.setCustomDnsEnabled}
-                      />
-                    </AriaInput>
-                  </AriaInputGroup>
-                </StyledCustomDnsSwitchContainer>
-                <Accordion
-                  expanded={
-                    this.customDnsAvailable() &&
-                    (this.props.dns.state === 'custom' || this.state.showAddCustomDns)
-                  }>
-                  <CellList items={this.customDnsItems()} onRemove={this.removeDnsAddress} />
-
-                  {this.state.showAddCustomDns && (
-                    <div ref={this.customDnsInputContainerRef}>
-                      <Cell.RowInput
-                        placeholder={messages.pgettext('advanced-settings-view', 'Enter IP')}
-                        onSubmit={this.addDnsAddress}
-                        onChange={this.addDnsInputChange}
-                        invalid={this.state.invalidDnsIp}
-                        paddingLeft={32}
-                        onBlur={this.customDnsInputBlur}
-                        autofocus
-                      />
-                    </div>
-                  )}
-
-                  <StyledAddCustomDnsButton
-                    ref={this.customDnsAddButtonRef}
-                    onClick={this.showAddCustomDnsRow}
-                    disabled={this.state.showAddCustomDns}
-                    tabIndex={-1}>
-                    <StyledAddCustomDnsLabel tabIndex={-1}>
-                      {messages.pgettext('advanced-settings-view', 'Add a server')}
-                    </StyledAddCustomDnsLabel>
-                    <Cell.Icon
-                      source="icon-add"
-                      width={22}
-                      height={22}
-                      tintColor={colors.white60}
-                      tintHoverColor={colors.white80}
-                      tabIndex={-1}
-                    />
-                  </StyledAddCustomDnsButton>
-                </Accordion>
-
-                <StyledCustomDnsFooter>
-                  <Cell.FooterText>
-                    {this.customDnsAvailable() ? (
-                      messages.pgettext(
-                        'advanced-settings-view',
-                        'Enable to add at least one DNS server.',
-                      )
-                    ) : (
-                      <CustomDnsDisabledMessage />
-                    )}
-                  </Cell.FooterText>
-                </StyledCustomDnsFooter>
+                <CustomDnsSettings />
               </StyledNavigationScrollbars>
             </NavigationContainer>
-          </StyledContainer>
+          </SettingsContainer>
         </Layout>
 
         {this.state.showConfirmBlockWhenDisconnectedAlert &&
           this.renderConfirmBlockWhenDisconnectedAlert()}
-        {this.state.publicDnsIpToConfirm && this.renderCustomDnsConfirmationDialog()}
       </ModalContainer>
     );
   }
-
-  private customDnsAvailable(): boolean {
-    return (
-      this.props.dns.state === 'custom' ||
-      (!this.props.dns.defaultOptions.blockAds && !this.props.dns.defaultOptions.blockTrackers)
-    );
-  }
-
-  private setCustomDnsEnabled = async (enabled: boolean) => {
-    if (this.props.dns.customOptions.addresses.length > 0) {
-      await this.props.setDnsOptions({
-        ...this.props.dns,
-        state: enabled ? 'custom' : 'default',
-      });
-    }
-
-    if (enabled && this.props.dns.customOptions.addresses.length === 0) {
-      this.showAddCustomDnsRow();
-    }
-
-    if (!enabled) {
-      this.setState({ showAddCustomDns: false });
-    }
-  };
-
-  private customDnsItems(): ICellListItem<string>[] {
-    return this.props.dns.customOptions.addresses.map((address) => ({
-      label: address,
-      value: address,
-    }));
-  }
-
-  private showAddCustomDnsRow = () => {
-    this.setState({ showAddCustomDns: true });
-  };
-
-  // The input field should be hidden when it loses focus unless something on the same row or the
-  // add-button is the new focused element.
-  private customDnsInputBlur = (event?: React.FocusEvent<HTMLTextAreaElement>) => {
-    const relatedTarget = event?.relatedTarget as Node | undefined;
-    if (
-      relatedTarget &&
-      (this.customDnsSwitchRef.current?.contains(relatedTarget) ||
-        this.customDnsAddButtonRef.current?.contains(relatedTarget) ||
-        this.customDnsInputContainerRef.current?.contains(relatedTarget))
-    ) {
-      event?.target.focus();
-    } else {
-      this.hideAddCustomDnsRow();
-    }
-  };
-
-  private hideAddCustomDnsRow() {
-    if (!this.state.publicDnsIpToConfirm) {
-      this.setState({ showAddCustomDns: false });
-    }
-  }
-
-  private addDnsInputChange = (_value: string) => {
-    this.setState({ invalidDnsIp: false });
-  };
-
-  private hideCustomDnsConfirmationDialog = () => {
-    this.setState({ publicDnsIpToConfirm: undefined });
-  };
-
-  private confirmPublicDnsAddress = () => {
-    void this.addDnsAddress(this.state.publicDnsIpToConfirm!, true);
-    this.hideCustomDnsConfirmationDialog();
-  };
-
-  private addDnsAddress = async (address: string, confirmed?: boolean) => {
-    try {
-      const ipAddress = IpAddress.fromString(address);
-
-      if (ipAddress.isLocal() || confirmed) {
-        await this.props.setDnsOptions({
-          ...this.props.dns,
-          state:
-            this.props.dns.state === 'custom' || this.state.showAddCustomDns ? 'custom' : 'default',
-          customOptions: {
-            addresses: [...this.props.dns.customOptions.addresses, address],
-          },
-        });
-        this.hideAddCustomDnsRow();
-      } else {
-        this.setState({ publicDnsIpToConfirm: address });
-      }
-    } catch (e) {
-      this.setState({ invalidDnsIp: true });
-    }
-  };
-
-  private removeDnsAddress = (address: string) => {
-    const addresses = this.props.dns.customOptions.addresses.filter((item) => item !== address);
-    void this.props.setDnsOptions({
-      ...this.props.dns,
-      state: addresses.length > 0 && this.props.dns.state === 'custom' ? 'custom' : 'default',
-      customOptions: {
-        addresses,
-      },
-    });
-  };
 
   private tunnelProtocolItems = (
     hasWireguardKey: boolean,
   ): Array<ISelectorItem<OptionalTunnelProtocol>> => {
     return [
       {
-        label: messages.pgettext('advanced-settings-view', 'Automatic'),
+        label: messages.gettext('Automatic'),
         value: undefined,
-      },
-      {
-        label: messages.pgettext('advanced-settings-view', 'OpenVPN'),
-        value: 'openvpn',
       },
       {
         label: hasWireguardKey
           ? messages.pgettext('advanced-settings-view', 'WireGuard')
           : sprintf('%(label)s (%(error)s)', {
               label: messages.pgettext('advanced-settings-view', 'WireGuard'),
-              error: messages.pgettext('advanced-settings-view-wireguard', 'missing key'),
+              error: messages.pgettext('advanced-settings-view', 'missing key'),
             }),
         value: 'wireguard',
         disabled: !hasWireguardKey,
       },
+      {
+        label: messages.pgettext('advanced-settings-view', 'OpenVPN'),
+        value: 'openvpn',
+      },
     ];
-  };
-
-  private renderCustomDnsConfirmationDialog = () => {
-    return (
-      <ModalAlert
-        type={ModalAlertType.info}
-        buttons={[
-          <AppButton.RedButton key="confirm" onClick={this.confirmPublicDnsAddress}>
-            {messages.pgettext('advanced-settings-view', 'Add anyway')}
-          </AppButton.RedButton>,
-          <AppButton.BlueButton key="back" onClick={this.hideCustomDnsConfirmationDialog}>
-            {messages.gettext('Back')}
-          </AppButton.BlueButton>,
-        ]}
-        close={this.hideCustomDnsConfirmationDialog}
-        message={messages.pgettext(
-          'advanced-settings-view',
-          'The DNS server you want to add is public and will only work with WireGuard. To ensure that it always works, set the "Tunnel protocol" (in Advanced settings) to WireGuard.',
-        )}></ModalAlert>
-    );
   };
 
   private renderConfirmBlockWhenDisconnectedAlert = () => {
@@ -731,80 +277,4 @@ export default class AdvancedSettings extends React.Component<IProps, IState> {
   private onSelectTunnelProtocol = (protocol?: TunnelProtocol) => {
     this.props.setTunnelProtocol(protocol);
   };
-
-  private onSelectOpenvpnProtocol = (protocol?: RelayProtocol) => {
-    this.props.setOpenVpnRelayProtocolAndPort(protocol);
-  };
-
-  private onSelectOpenVpnPort = (port?: number) => {
-    this.props.setOpenVpnRelayProtocolAndPort(this.props.openvpn.protocol, port);
-  };
-
-  private onSelectWireguardPort = (port?: number) => {
-    this.props.setWireguardRelayPort(port);
-  };
-
-  private onSelectBridgeState = (bridgeState: BridgeState) => {
-    this.props.setBridgeState(bridgeState);
-  };
-
-  private onMssfixSubmit = (value: string) => {
-    const parsedValue = value === '' ? undefined : parseInt(value, 10);
-    if (AdvancedSettings.mssfixIsValid(value)) {
-      this.props.setOpenVpnMssfix(parsedValue);
-    }
-  };
-
-  private static removeNonNumericCharacters(value: string) {
-    return value.replace(/[^0-9]/g, '');
-  }
-
-  private static mssfixIsValid(mssfix: string): boolean {
-    const parsedMssFix = mssfix ? parseInt(mssfix) : undefined;
-    return (
-      parsedMssFix === undefined ||
-      (parsedMssFix >= MIN_MSSFIX_VALUE && parsedMssFix <= MAX_MSSFIX_VALUE)
-    );
-  }
-
-  private onWireguardMtuSubmit = (value: string) => {
-    const parsedValue = value === '' ? undefined : parseInt(value, 10);
-    if (AdvancedSettings.wireguarMtuIsValid(value)) {
-      this.props.setWireguardMtu(parsedValue);
-    }
-  };
-
-  private static wireguarMtuIsValid(mtu: string): boolean {
-    const parsedMtu = mtu ? parseInt(mtu) : undefined;
-    return (
-      parsedMtu === undefined ||
-      (parsedMtu >= MIN_WIREGUARD_MTU_VALUE && parsedMtu <= MAX_WIREGUARD_MTU_VALUE)
-    );
-  }
-}
-
-function CustomDnsDisabledMessage() {
-  const blockAdsFeatureName = messages.pgettext('preferences-view', 'Block ads');
-  const blockTrackersFeatureName = messages.pgettext('preferences-view', 'Block trackers');
-  const preferencesPageName = messages.pgettext('preferences-nav', 'Preferences');
-
-  // TRANSLATORS: This is displayed when either or both of the block ads/trackers settings are
-  // TRANSLATORS: turned on which makes the custom DNS setting disabled. The text enclosed in "**"
-  // TRANSLATORS: will appear bold.
-  // TRANSLATORS: Available placeholders:
-  // TRANSLATORS: %(blockAdsFeatureName)s - The name displayed next to the "Block ads" toggle.
-  // TRANSLATORS: %(blockTrackersFeatureName)s - The name displayed next to the "Block trackers" toggle.
-  // TRANSLATORS: %(preferencesPageName)s - The page title showed on top in the preferences page.
-  const customDnsDisabledMessage = messages.pgettext(
-    'preferences-view',
-    'Disable **%(blockAdsFeatureName)s** and **%(blockTrackersFeatureName)s** (under %(preferencesPageName)s) to activate this setting.',
-  );
-
-  return formatMarkdown(
-    sprintf(customDnsDisabledMessage, {
-      blockAdsFeatureName,
-      blockTrackersFeatureName,
-      preferencesPageName,
-    }),
-  );
 }

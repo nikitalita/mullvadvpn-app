@@ -26,7 +26,6 @@ import {
   IAccountData,
   IAppVersionInfo,
   IDnsOptions,
-  ILocation,
   IRelayList,
   ISettings,
   IWireguardPublicKey,
@@ -88,6 +87,8 @@ const GUI_VERSION = app.getVersion().replace('.0', '');
 /// Mirrors the beta check regex in the daemon. Matches only well formed beta versions
 const IS_BETA = /^(\d{4})\.(\d+)-beta(\d+)$/;
 
+const UPDATE_NOTIFICATION_DISABLED = process.env.MULLVAD_DISABLE_UPDATE_NOTIFICATION === '1';
+
 const SANDBOX_DISABLED = app.commandLine.hasSwitch('no-sandbox');
 
 enum AppQuitStage {
@@ -116,12 +117,16 @@ class ApplicationMain {
   private daemonRpc = new DaemonRpc(DAEMON_RPC_PATH);
   private daemonEventListener?: SubscriptionListener<DaemonEvent>;
   private reconnectBackoff = new ReconnectionBackoff();
+  private beforeFirstDaemonConnection = true;
   private connectedToDaemon = false;
   private quitStage = AppQuitStage.unready;
 
   private accountData?: IAccountData = undefined;
   private accountHistory?: AccountToken = undefined;
   private tunnelState: TunnelState = { state: 'disconnected' };
+  private lastIgnoredTunnelState?: TunnelState;
+  private ignoreTunnelStatesUntil?: TunnelState['state'];
+  private ignoreTunnelStateFallbackScheduler = new Scheduler();
   private settings: ISettings = {
     accountToken: undefined,
     allowLan: false,
@@ -136,6 +141,7 @@ class ApplicationMain {
       normal: {
         location: 'any',
         tunnelProtocol: 'any',
+        providers: [],
         openvpnConstraints: {
           port: 'any',
           protocol: 'any',
@@ -148,6 +154,7 @@ class ApplicationMain {
     bridgeSettings: {
       normal: {
         location: 'any',
+        providers: [],
       },
     },
     bridgeState: 'auto',
@@ -174,10 +181,7 @@ class ApplicationMain {
     },
   };
   private guiSettings = new GuiSettings();
-  private location?: ILocation;
-  private lastDisconnectedLocation?: ILocation;
   private tunnelStateExpectation?: Expectation;
-  private getLocationPromise?: Promise<ILocation>;
 
   private relays: IRelayList = { countries: [] };
 
@@ -223,6 +227,8 @@ class ApplicationMain {
 
   private autoConnectOnWireguardKeyEvent = false;
   private autoConnectFallbackScheduler = new Scheduler();
+
+  private blurNavigationResetScheduler = new Scheduler();
 
   private rendererLog?: Logger;
   private translations: ITranslations = { locale: this.locale };
@@ -498,7 +504,6 @@ class ApplicationMain {
 
       this.installWindowCloseHandler(this.windowController);
       this.installTrayClickHandlers();
-      this.installGenericFocusHandlers(this.windowController);
 
       const filePath = path.resolve(path.join(__dirname, '../renderer/index.html'));
       try {
@@ -515,6 +520,8 @@ class ApplicationMain {
   }
 
   private onDaemonConnected = async () => {
+    const firstDaemonConnection = this.beforeFirstDaemonConnection;
+    this.beforeFirstDaemonConnection = false;
     this.connectedToDaemon = true;
 
     log.info('Connected to the daemon');
@@ -582,7 +589,9 @@ class ApplicationMain {
     }
 
     // fetch the latest version info in background
-    void this.fetchLatestVersion();
+    if (!UPDATE_NOTIFICATION_DISABLED) {
+      void this.fetchLatestVersion();
+    }
 
     // reset the reconnect backoff when connection established.
     this.reconnectBackoff.reset();
@@ -591,6 +600,10 @@ class ApplicationMain {
     // before this if-statement is reached.
     if (this.windowController && this.connectedToDaemon) {
       IpcMainEventChannel.daemon.notifyConnected(this.windowController.webContents);
+    }
+
+    if (firstDaemonConnection) {
+      void this.autoConnect();
     }
 
     // show window when account is not set
@@ -609,6 +622,10 @@ class ApplicationMain {
 
     // Reset the daemon event listener since it's going to be invalidated on disconnect
     this.daemonEventListener = undefined;
+
+    this.ignoreTunnelStatesUntil = undefined;
+    this.lastIgnoredTunnelState = undefined;
+    this.autoConnectFallbackScheduler.cancel();
 
     if (wasConnected) {
       this.connectedToDaemon = false;
@@ -715,10 +732,30 @@ class ApplicationMain {
     this.wireguardKeygenEventAutoConnect();
   }
 
+  private setIgnoreTunnelStatesUntil(state: TunnelState['state']) {
+    this.ignoreTunnelStatesUntil = state;
+    this.ignoreTunnelStateFallbackScheduler.schedule(() => {
+      if (this.lastIgnoredTunnelState) {
+        this.ignoreTunnelStatesUntil = undefined;
+        this.setTunnelState(this.lastIgnoredTunnelState);
+        this.lastIgnoredTunnelState = undefined;
+      }
+    }, 3000);
+  }
+
   private setTunnelState(newState: TunnelState) {
+    if (this.ignoreTunnelStatesUntil) {
+      if (this.ignoreTunnelStatesUntil === newState.state) {
+        this.ignoreTunnelStatesUntil = undefined;
+        this.lastIgnoredTunnelState = undefined;
+      } else {
+        this.lastIgnoredTunnelState = newState;
+        return;
+      }
+    }
+
     this.tunnelState = newState;
     this.updateTrayIcon(newState, this.settings.blockWhenDisconnected);
-    void this.updateLocation();
 
     if (process.platform === 'linux') {
       this.tray?.setContextMenu(this.createTrayContextMenu());
@@ -782,14 +819,6 @@ class ApplicationMain {
         this.windowController.webContents,
         applications,
       );
-    }
-  }
-
-  private setLocation(newLocation: ILocation) {
-    this.location = newLocation;
-
-    if (this.windowController) {
-      IpcMainEventChannel.location.notify(this.windowController.webContents, newLocation);
     }
   }
 
@@ -919,6 +948,10 @@ class ApplicationMain {
   }
 
   private setLatestVersion(latestVersionInfo: IAppVersionInfo) {
+    if (UPDATE_NOTIFICATION_DISABLED) {
+      return;
+    }
+
     const suggestedIsBeta =
       latestVersionInfo.suggestedUpgrade !== undefined &&
       IS_BETA.test(latestVersionInfo.suggestedUpgrade);
@@ -963,50 +996,6 @@ class ApplicationMain {
     }
   }
 
-  private async updateLocation() {
-    const tunnelState = this.tunnelState;
-
-    if (tunnelState.state === 'connected' || tunnelState.state === 'connecting') {
-      // Location was broadcasted with the tunnel state, but it doesn't contain the relay out IP
-      // address, so it will have to be fetched afterwards
-      if (tunnelState.details && tunnelState.details.location) {
-        this.setLocation(tunnelState.details.location);
-      }
-    } else if (tunnelState.state === 'disconnected') {
-      // It may take some time to fetch the new user location.
-      // So take the user to the last known location when disconnected.
-      if (this.lastDisconnectedLocation) {
-        this.setLocation(this.lastDisconnectedLocation);
-      }
-    }
-
-    if (tunnelState.state === 'connected' || tunnelState.state === 'disconnected') {
-      try {
-        // Fetch the new user location
-        const getLocationPromise = (this.getLocationPromise = this.daemonRpc.getLocation());
-        const location = await getLocationPromise;
-        // If the location is currently unavailable, do nothing! This only ever
-        // happens when a custom relay is set or we are in a blocked state.
-        if (!location) {
-          return;
-        }
-
-        // Cache the user location
-        // Note: hostname is only set for relay servers.
-        if (location.hostname === null) {
-          this.lastDisconnectedLocation = location;
-        }
-
-        // Broadcast the new location if it is the result of the most recent call to getLocation.
-        if (getLocationPromise === this.getLocationPromise) {
-          this.setLocation(location);
-        }
-      } catch (error) {
-        log.error(`Failed to update the location: ${error.message}`);
-      }
-    }
-  }
-
   private trayIconType(tunnelState: TunnelState, blockWhenDisconnected: boolean): TrayIconType {
     switch (tunnelState.state) {
       case 'connected':
@@ -1043,6 +1032,10 @@ class ApplicationMain {
 
   private registerWindowListener(windowController: WindowController) {
     windowController.window?.on('focus', () => {
+      IpcMainEventChannel.windowFocus.notify(windowController.webContents, true);
+
+      this.blurNavigationResetScheduler.cancel();
+
       // cancel notifications when window appears
       this.notificationController.cancelPendingNotifications();
 
@@ -1056,8 +1049,19 @@ class ApplicationMain {
     });
 
     windowController.window?.on('blur', () => {
+      IpcMainEventChannel.windowFocus.notify(windowController.webContents, false);
+
       // ensure notification guard is reset
       this.notificationController.resetTunnelStateAnnouncements();
+    });
+
+    // Use hide instead of blur to prevent the navigation reset from happening when bluring an
+    // unpinned window.
+    windowController.window?.on('hide', () => {
+      this.blurNavigationResetScheduler.schedule(
+        () => IpcMainEventChannel.navigation.notifyReset(windowController.webContents),
+        120_000,
+      );
     });
   }
 
@@ -1069,7 +1073,6 @@ class ApplicationMain {
       accountHistory: this.accountHistory,
       tunnelState: this.tunnelState,
       settings: this.settings,
-      location: this.location,
       relayListPair: {
         relays: this.processRelaysForPresentation(
           this.relays,
@@ -1125,9 +1128,20 @@ class ApplicationMain {
       return this.setAutoStart(autoStart);
     });
 
-    IpcMainEventChannel.tunnel.handleConnect(() => this.daemonRpc.connectTunnel());
-    IpcMainEventChannel.tunnel.handleDisconnect(() => this.daemonRpc.disconnectTunnel());
-    IpcMainEventChannel.tunnel.handleReconnect(() => this.daemonRpc.reconnectTunnel());
+    IpcMainEventChannel.location.handleGet(() => this.daemonRpc.getLocation());
+
+    IpcMainEventChannel.tunnel.handleConnect(() => {
+      this.setIgnoreTunnelStatesUntil('connecting');
+      return this.daemonRpc.connectTunnel();
+    });
+    IpcMainEventChannel.tunnel.handleDisconnect(() => {
+      this.setIgnoreTunnelStatesUntil('disconnecting');
+      return this.daemonRpc.disconnectTunnel();
+    });
+    IpcMainEventChannel.tunnel.handleReconnect(() => {
+      this.setIgnoreTunnelStatesUntil('connecting');
+      return this.daemonRpc.reconnectTunnel();
+    });
 
     IpcMainEventChannel.guiSettings.handleSetEnableSystemNotifications((flag: boolean) => {
       this.guiSettings.enableSystemNotifications = flag;
@@ -1371,13 +1385,25 @@ class ApplicationMain {
   }
 
   private async autoConnect() {
-    if (!this.accountData || !hasExpired(this.accountData.expiry)) {
-      try {
-        log.info('Auto-connecting the tunnel');
-        await this.daemonRpc.connectTunnel();
-      } catch (error) {
-        log.error(`Failed to auto-connect the tunnel: ${error.message}`);
+    if (process.env.NODE_ENV === 'development') {
+      log.info('Skip autoconnect in development');
+    } else if (
+      this.settings.accountToken &&
+      (!this.accountData || !hasExpired(this.accountData.expiry))
+    ) {
+      if (this.guiSettings.autoConnect) {
+        try {
+          log.info('Autoconnect the tunnel');
+
+          await this.daemonRpc.connectTunnel();
+        } catch (error) {
+          log.error(`Failed to autoconnect the tunnel: ${error.message}`);
+        }
+      } else {
+        log.info('Skip autoconnect because GUI setting is disabled');
       }
+    } else {
+      log.info('Skip autoconnect because account token is not set');
     }
   }
 
@@ -1759,7 +1785,7 @@ class ApplicationMain {
     const template: Electron.MenuItemConstructorOptions[] = [
       {
         label: sprintf(messages.pgettext('tray-icon-context-menu', 'Open %(mullvadVpn)s'), {
-          mullvadVpn: messages.pgettext('generic', 'Mullvad VPN'),
+          mullvadVpn: 'Mullvad VPN',
         }),
         click: () => this.windowController?.show(),
       },
@@ -1938,15 +1964,6 @@ class ApplicationMain {
         }
       });
     }
-  }
-
-  private installGenericFocusHandlers(windowController: WindowController) {
-    windowController.window?.on('focus', () => {
-      IpcMainEventChannel.windowFocus.notify(windowController.webContents, true);
-    });
-    windowController.window?.on('blur', () => {
-      IpcMainEventChannel.windowFocus.notify(windowController.webContents, false);
-    });
   }
 
   private shouldShowWindowOnStart(): boolean {

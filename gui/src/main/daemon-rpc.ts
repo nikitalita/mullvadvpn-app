@@ -293,6 +293,12 @@ export class DaemonRpc {
         );
       }
 
+      if (settingsUpdate.providers) {
+        const providerUpdate = new grpcTypes.ProviderUpdate();
+        providerUpdate.setProvidersList(settingsUpdate.providers);
+        normalUpdate.setProviders(providerUpdate);
+      }
+
       grpcRelaySettings.setNormal(normalUpdate);
       await this.call<grpcTypes.RelaySettingsUpdate, Empty>(
         this.client.updateRelaySettings,
@@ -924,6 +930,7 @@ function convertFromRelaySettings(
           ? { only: convertFromLocation(grpcLocation.toObject()) }
           : 'any';
         const tunnelProtocol = convertFromTunnelTypeConstraint(normal.getTunnelType()!);
+        const providers = normal.getProvidersList();
         const openvpnConstraints = convertFromOpenVpnConstraints(normal.getOpenvpnConstraints()!);
         const wireguardConstraints = convertFromWireguardConstraints(
           normal.getWireguardConstraints()!,
@@ -933,6 +940,7 @@ function convertFromRelaySettings(
           normal: {
             location,
             tunnelProtocol,
+            providers,
             wireguardConstraints,
             openvpnConstraints,
           },
@@ -951,9 +959,11 @@ function convertFromBridgeSettings(
   if (normalSettings) {
     const grpcLocation = normalSettings.location;
     const location = grpcLocation ? { only: convertFromLocation(grpcLocation) } : 'any';
+    const providers = normalSettings.providersList;
     return {
       normal: {
         location,
+        providers,
       },
     };
   }
@@ -1127,25 +1137,32 @@ function convertFromKeygenEvent(data: grpcTypes.KeygenEvent): KeygenEvent {
 function convertFromOpenVpnConstraints(
   constraints: grpcTypes.OpenvpnConstraints,
 ): IOpenVpnConstraints {
-  const port = convertFromConstraint(constraints.getPort());
-  let protocol: Constraint<RelayProtocol> = 'any';
-  switch (constraints.getProtocol()?.getProtocol()) {
-    case grpcTypes.TransportProtocol.TCP:
-      protocol = { only: 'tcp' };
-      break;
-    case grpcTypes.TransportProtocol.UDP:
-      protocol = { only: 'udp' };
-      break;
+  const transportPort = convertFromConstraint(constraints.getPort());
+  if (transportPort !== 'any' && 'only' in transportPort) {
+    const port = convertFromConstraint(transportPort.only.getPort());
+    let protocol: Constraint<RelayProtocol> = 'any';
+    switch (transportPort.only.getProtocol()) {
+      case grpcTypes.TransportProtocol.TCP:
+        protocol = { only: 'tcp' };
+        break;
+      case grpcTypes.TransportProtocol.UDP:
+        protocol = { only: 'udp' };
+        break;
+    }
+    return { port, protocol };
   }
-
-  return { port, protocol };
+  return { port: 'any', protocol: 'any' };
 }
 
 function convertFromWireguardConstraints(
   constraints: grpcTypes.WireguardConstraints,
 ): IWireguardConstraints {
-  const port = convertFromConstraint(constraints.getPort());
-  return { port };
+  const transportPort = convertFromConstraint(constraints.getPort());
+  if (transportPort !== 'any' && 'only' in transportPort) {
+    const port = convertFromConstraint(transportPort.only.getPort());
+    return { port };
+  }
+  return { port: 'any' };
 }
 
 function convertFromTunnelTypeConstraint(
@@ -1177,6 +1194,7 @@ function convertToNormalBridgeSettings(
 ): grpcTypes.BridgeSettings.BridgeConstraints {
   const normalBridgeSettings = new grpcTypes.BridgeSettings.BridgeConstraints();
   normalBridgeSettings.setLocation(convertToLocation(liftConstraint(constraints.location)));
+  normalBridgeSettings.setProvidersList(constraints.providers);
 
   return normalBridgeSettings;
 }
@@ -1226,15 +1244,15 @@ function convertToOpenVpnConstraints(
 ): grpcTypes.OpenvpnConstraints | undefined {
   const openvpnConstraints = new grpcTypes.OpenvpnConstraints();
   if (constraints) {
-    const port = liftConstraint(constraints.port);
-    if (port) {
-      openvpnConstraints.setPort(port);
-    }
     const protocol = liftConstraint(constraints.protocol);
     if (protocol) {
-      const transportConstraint = new grpcTypes.TransportProtocolConstraint();
-      transportConstraint.setProtocol(convertToTransportProtocol(protocol));
-      openvpnConstraints.setProtocol(transportConstraint);
+      const portConstraints = new grpcTypes.TransportPort();
+      const port = liftConstraint(constraints.port);
+      if (port) {
+        portConstraints.setPort(port);
+      }
+      portConstraints.setProtocol(convertToTransportProtocol(protocol));
+      openvpnConstraints.setPort(portConstraints);
     }
     return openvpnConstraints;
   }
@@ -1249,7 +1267,10 @@ function convertToWireguardConstraints(
     const wireguardConstraints = new grpcTypes.WireguardConstraints();
     const port = liftConstraint(constraint.port);
     if (port) {
-      wireguardConstraints.setPort(port);
+      const portConstraints = new grpcTypes.TransportPort();
+      portConstraints.setPort(port);
+      portConstraints.setProtocol(grpcTypes.TransportProtocol.UDP);
+      wireguardConstraints.setPort(portConstraints);
     }
     return wireguardConstraints;
   }

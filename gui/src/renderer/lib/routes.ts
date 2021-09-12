@@ -11,8 +11,11 @@ export enum RoutePath {
   accountSettings = '/settings/account',
   preferences = '/settings/preferences',
   advancedSettings = '/settings/advanced',
-  wireguardKeys = '/settings/advanced/wireguard-keys',
+  wireguardSettings = '/settings/advanced/wireguard',
+  wireguardKeys = '/settings/advanced/wireguard/keys',
+  openVpnSettings = '/settings/advanced/openvpn',
   splitTunneling = '/settings/advanced/split-tunneling',
   support = '/settings/support',
   selectLocation = '/select-location',
+  filterByProvider = '/select-location/filter-by-provider',
 }

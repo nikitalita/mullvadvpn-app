@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Provider } from 'react-redux';
+import { batch, Provider } from 'react-redux';
 import { Router } from 'react-router';
 import { bindActionCreators } from 'redux';
 
@@ -116,15 +116,17 @@ export default class AppRenderer {
   };
 
   private locale = 'en';
-  private location?: ILocation;
+  private location?: Partial<ILocation>;
+  private lastDisconnectedLocation?: Partial<ILocation>;
   private relayListPair!: IRelayListPair;
   private tunnelState!: TunnelState;
+  private optimisticTunnelState?: TunnelState['state'];
   private settings!: ISettings;
   private guiSettings!: IGuiSettingsState;
-  private autoConnected = false;
   private doingLogin = false;
   private loginScheduler = new Scheduler();
   private connectedToDaemon = false;
+  private getLocationPromise?: Promise<ILocation>;
 
   constructor() {
     log.addOutput(new ConsoleOutput(LogLevel.debug));
@@ -165,10 +167,6 @@ export default class AppRenderer {
       this.updateBlockedState(this.tunnelState, newSettings.blockWhenDisconnected);
     });
 
-    IpcRendererEventChannel.location.listen((newLocation: ILocation) => {
-      this.setLocation(newLocation);
-    });
-
     IpcRendererEventChannel.relays.listen((relayListPair: IRelayListPair) => {
       this.setRelayListPair(relayListPair);
     });
@@ -205,6 +203,8 @@ export default class AppRenderer {
       this.reduxActions.userInterface.setWindowFocused(focus);
     });
 
+    IpcRendererEventChannel.navigation.listenReset(() => this.history.dismiss(true));
+
     // Request the initial state from the main process
     const initialState = IpcRendererEventChannel.state.get();
 
@@ -230,10 +230,6 @@ export default class AppRenderer {
     this.setTunnelState(initialState.tunnelState);
     this.updateBlockedState(initialState.tunnelState, initialState.settings.blockWhenDisconnected);
 
-    if (initialState.location) {
-      this.setLocation(initialState.location);
-    }
-
     this.setRelayListPair(initialState.relayListPair);
     this.setCurrentVersion(initialState.currentVersion);
     this.setUpgradeVersion(initialState.upgradeVersion);
@@ -252,6 +248,8 @@ export default class AppRenderer {
         initialState.windowsSplitTunnelingApplications,
       );
     }
+
+    void this.updateLocation();
 
     const navigationBase = this.getNavigationBase(
       initialState.isConnected,
@@ -326,23 +324,51 @@ export default class AppRenderer {
   }
 
   public async connectTunnel(): Promise<void> {
-    const state = this.tunnelState.state;
+    const state = this.optimisticTunnelState ?? this.tunnelState.state;
 
     // connect only if tunnel is disconnected or blocked.
     if (state === 'disconnecting' || state === 'disconnected' || state === 'error') {
       // switch to the connecting state ahead of time to make the app look more responsive
-      this.reduxActions.connection.connecting();
+      this.optimisticTunnelState = 'connecting';
+      batch(() => {
+        void this.updateLocation({ state: 'connecting' });
+        this.reduxActions.connection.connecting();
+      });
 
       return IpcRendererEventChannel.tunnel.connect();
     }
   }
 
-  public disconnectTunnel(): Promise<void> {
-    return IpcRendererEventChannel.tunnel.disconnect();
+  public async disconnectTunnel(): Promise<void> {
+    const state = this.optimisticTunnelState ?? this.tunnelState.state;
+
+    // disconnect only if tunnel is connected, connecting or blocked.
+    if (state === 'connecting' || state === 'connected' || state === 'error') {
+      // switch to the disconnecting state ahead of time to make the app look more responsive
+      this.optimisticTunnelState = 'disconnecting';
+      batch(() => {
+        void this.updateLocation({ state: 'disconnecting', details: 'nothing' });
+        this.reduxActions.connection.disconnecting('nothing');
+      });
+
+      return IpcRendererEventChannel.tunnel.disconnect();
+    }
   }
 
-  public reconnectTunnel(): Promise<void> {
-    return IpcRendererEventChannel.tunnel.reconnect();
+  public async reconnectTunnel(): Promise<void> {
+    const state = this.optimisticTunnelState ?? this.tunnelState.state;
+
+    // reconnect only if tunnel is connected or connecting.
+    if (state === 'connecting' || state === 'connected') {
+      // switch to the connecting state ahead of time to make the app look more responsive
+      this.optimisticTunnelState = 'connecting';
+      batch(() => {
+        void this.updateLocation({ state: 'connecting' });
+        this.reduxActions.connection.connecting();
+      });
+
+      return IpcRendererEventChannel.tunnel.reconnect();
+    }
   }
 
   public updateRelaySettings(relaySettings: RelaySettingsUpdate) {
@@ -361,7 +387,7 @@ export default class AppRenderer {
     return IpcRendererEventChannel.accountHistory.clear();
   }
 
-  public async openLinkWithAuth(link: string): Promise<void> {
+  public openLinkWithAuth = async (link: string): Promise<void> => {
     let token = '';
     try {
       token = await IpcRendererEventChannel.account.getWwwAuthToken();
@@ -369,7 +395,7 @@ export default class AppRenderer {
       log.error(`Failed to get the WWW auth token: ${e.message}`);
     }
     void this.openUrl(`${link}?token=${token}`);
-  }
+  };
 
   public async setAllowLan(allowLan: boolean) {
     const actions = this.reduxActions;
@@ -595,11 +621,13 @@ export default class AppRenderer {
         openvpnConstraints,
         wireguardConstraints,
         tunnelProtocol,
+        providers,
       } = relaySettings.normal;
 
       actions.settings.updateRelay({
         normal: {
           location: liftConstraint(location),
+          providers,
           openvpn: {
             port: liftConstraint(openvpnConstraints.port),
             protocol: liftConstraint(openvpnConstraints.protocol),
@@ -642,9 +670,8 @@ export default class AppRenderer {
     }
   }
 
-  private async onDaemonConnected() {
+  private onDaemonConnected() {
     this.connectedToDaemon = true;
-    await this.autoConnect();
     this.resetNavigation();
   }
 
@@ -694,30 +721,6 @@ export default class AppRenderer {
     }
   }
 
-  private async autoConnect() {
-    if (window.env.development) {
-      log.info('Skip autoconnect in development');
-    } else if (this.autoConnected) {
-      log.info('Skip autoconnect because it was done before');
-    } else if (this.settings.accountToken) {
-      if (this.guiSettings.autoConnect) {
-        try {
-          log.info('Autoconnect the tunnel');
-
-          await this.connectTunnel();
-
-          this.autoConnected = true;
-        } catch (error) {
-          log.error(`Failed to autoconnect the tunnel: ${error.message}`);
-        }
-      } else {
-        log.info('Skip autoconnect because GUI setting is disabled');
-      }
-    } else {
-      log.info('Skip autoconnect because account token is not set');
-    }
-  }
-
   private setAccountHistory(accountHistory?: AccountToken) {
     this.reduxActions.account.updateAccountHistory(accountHistory);
   }
@@ -728,6 +731,9 @@ export default class AppRenderer {
     log.debug(`Tunnel state: ${tunnelState.state}`);
 
     this.tunnelState = tunnelState;
+    // The main process doesn't notify the tunnel state while waiting for a new one (unless it times
+    // out). Therefore the first tunnel state update will be the one we're waiting for.
+    this.optimisticTunnelState = undefined;
 
     switch (tunnelState.state) {
       case 'connecting':
@@ -750,6 +756,9 @@ export default class AppRenderer {
         actions.connection.blocked(tunnelState.details);
         break;
     }
+
+    // Update the location when entering a new tunnel state since it's likely changed.
+    void this.updateLocation();
   }
 
   private setSettings(newSettings: ISettings) {
@@ -814,7 +823,7 @@ export default class AppRenderer {
     this.doingLogin = false;
   }
 
-  private setLocation(location: ILocation) {
+  private setLocation(location: Partial<ILocation>) {
     this.location = location;
     this.propagateLocationToRedux();
   }
@@ -825,7 +834,7 @@ export default class AppRenderer {
     }
   }
 
-  private translateLocation(inputLocation: ILocation): ILocation {
+  private translateLocation(inputLocation: Partial<ILocation>): Partial<ILocation> {
     const location = { ...inputLocation };
 
     if (location.city) {
@@ -905,5 +914,100 @@ export default class AppRenderer {
 
   private setWireguardPublicKey(publicKey?: IWireguardPublicKey) {
     this.reduxActions.settings.setWireguardKey(publicKey);
+  }
+
+  private async updateLocation(tunnelState = this.tunnelState) {
+    switch (tunnelState.state) {
+      case 'disconnected': {
+        if (this.lastDisconnectedLocation) {
+          this.setLocation(this.lastDisconnectedLocation);
+        }
+        const location = await this.fetchLocation();
+        if (location) {
+          this.setLocation(location);
+          this.lastDisconnectedLocation = location;
+        }
+        break;
+      }
+      case 'disconnecting':
+        if (this.lastDisconnectedLocation) {
+          this.setLocation(this.lastDisconnectedLocation);
+        } else {
+          // If there's no previous location while disconnecting we remove the location. We keep the
+          // coordinates to prevent the map from jumping around.
+          const { longitude, latitude } = this.reduxStore.getState().connection;
+          this.setLocation({ longitude, latitude });
+        }
+        break;
+      case 'connecting':
+        this.setLocation(tunnelState.details?.location ?? this.getLocationFromConstraints());
+        break;
+      case 'connected': {
+        if (tunnelState.details?.location) {
+          this.setLocation(tunnelState.details.location);
+        }
+        const location = await this.fetchLocation();
+        if (location) {
+          this.setLocation(location);
+        }
+        break;
+      }
+    }
+  }
+
+  private async fetchLocation(): Promise<ILocation | void> {
+    try {
+      // Fetch the new user location
+      const getLocationPromise = IpcRendererEventChannel.location.get();
+      this.getLocationPromise = getLocationPromise;
+      const location = await getLocationPromise;
+      // If the location is currently unavailable, do nothing! This only ever happens when a
+      // custom relay is set or we are in a blocked state.
+      if (location && getLocationPromise === this.getLocationPromise) {
+        return location;
+      }
+    } catch (error) {
+      log.error(`Failed to update the location: ${error.message}`);
+    }
+  }
+
+  private getLocationFromConstraints(): Partial<ILocation> {
+    const state = this.reduxStore.getState();
+    const coordinates = {
+      longitude: state.connection.longitude,
+      latitude: state.connection.latitude,
+    };
+
+    const relaySettings = this.settings.relaySettings;
+    if ('normal' in relaySettings) {
+      const location = relaySettings.normal.location;
+      if (location !== 'any' && 'only' in location) {
+        const constraint = location.only;
+
+        const relayLocations = state.settings.relayLocations;
+        if ('country' in constraint) {
+          const country = relayLocations.find(({ code }) => constraint.country === code);
+
+          return { country: country?.name, ...coordinates };
+        } else if ('city' in constraint) {
+          const country = relayLocations.find(({ code }) => constraint.city[0] === code);
+          const city = country?.cities.find(({ code }) => constraint.city[1] === code);
+
+          return { country: country?.name, city: city?.name, ...coordinates };
+        } else if ('hostname' in constraint) {
+          const country = relayLocations.find(({ code }) => constraint.hostname[0] === code);
+          const city = country?.cities.find((location) => location.code === constraint.hostname[1]);
+
+          return {
+            country: country?.name,
+            city: city?.name,
+            hostname: constraint.hostname[2],
+            ...coordinates,
+          };
+        }
+      }
+    }
+
+    return coordinates;
   }
 }

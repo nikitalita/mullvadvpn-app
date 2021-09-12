@@ -313,13 +313,13 @@ message TunnelTypeUpdate {
 	TunnelTypeConstraint tunnel_type = 2;
 }
 
-message TransportProtocolConstraint {
+message TransportPort {
 	TransportProtocol protocol = 1;
+	uint32 port = 2;
 }
 
 message OpenvpnConstraints {
-	uint32 port = 1;
-	TransportProtocolConstraint protocol = 2;
+	TransportPort port = 1;
 }
 
 enum IpVersion {
@@ -332,8 +332,7 @@ message IpVersionConstraint {
 }
 
 message WireguardConstraints {
-	// NOTE: optional
-	uint32 port = 1;
+	TransportPort port = 1;
 	IpVersionConstraint ip_version = 2;
 	RelayLocation entry_location = 3;
 }
