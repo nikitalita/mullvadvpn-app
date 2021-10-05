@@ -13,14 +13,14 @@ protocol DisplayChainedError {
     var errorChainDescription: String? { get }
 }
 
-extension RestError: DisplayChainedError {
+extension REST.Error: DisplayChainedError {
     var errorChainDescription: String? {
         switch self {
         case .network(let urlError):
             return String(
                 format: NSLocalizedString(
                     "NETWORK_ERROR",
-                    tableName: "MullvadRest",
+                    tableName: "RESTClient",
                     value: "Network error: %@",
                     comment: "Network error. Use %@ placeholder to place localized failure description."
                 ),
@@ -33,7 +33,7 @@ extension RestError: DisplayChainedError {
                 return String(
                     format: NSLocalizedString(
                         "SERVER_ERROR",
-                        tableName: "MullvadRest",
+                        tableName: "RESTClient",
                         value: "Server error: %@",
                         comment: "Server error. Use %@ placeholder to place localized failure description."
                     ),
@@ -43,21 +43,21 @@ extension RestError: DisplayChainedError {
         case .encodePayload:
             return NSLocalizedString(
                 "SERVER_REQUEST_ENCODING_ERROR",
-                tableName: "MullvadRest",
+                tableName: "RESTClient",
                 value: "Server request encoding error",
                 comment: "Failure to encode the server request."
             )
         case .decodeSuccessResponse:
             return NSLocalizedString(
                 "SERVER_SUCCESS_RESPONSE_DECODING_ERROR",
-                tableName: "MullvadRest",
+                tableName: "RESTClient",
                 value: "Server success response decoding error",
                 comment: "Failure to decode the server success response."
             )
         case .decodeErrorResponse:
             return NSLocalizedString(
                 "SERVER_FAILURE_RESPONSE_DECODING_ERROR",
-                tableName: "MullvadRest",
+                tableName: "RESTClient",
                 value: "Server error response decoding error",
                 comment: "Failure to decode the server failure response."
             )
@@ -236,19 +236,6 @@ extension TunnelManager.Error: DisplayChainedError {
             // This error is never displayed anywhere
             return nil
 
-        case .verifyWireguardKey(let restError):
-            let reason = restError.errorChainDescription ?? ""
-
-            return String(
-                format: NSLocalizedString(
-                    "VERIFY_WIREGUARD_KEY_ERROR",
-                    tableName: "TunnelManager",
-                    value: "Failed to verify the WireGuard key on server: %@",
-                    comment: ""
-                ),
-                reason
-            )
-
         case .missingAccount:
             return NSLocalizedString(
                 "MISSING_ACCOUNT_INTERNAL_ERROR",
@@ -256,6 +243,24 @@ extension TunnelManager.Error: DisplayChainedError {
                 value: "Internal error: missing account",
                 comment: ""
             )
+        case .readRelays:
+            return NSLocalizedString(
+                "READ_RELAYS_ERROR",
+                tableName: "TunnelManager",
+                value: "Failed to read relays.",
+                comment: ""
+            )
+        case .cannotSatisfyRelayConstraints:
+            return NSLocalizedString(
+                "CANNOT_SATISFY_RELAY_CONSTRAINTS_ERROR",
+                tableName: "TunnelManager",
+                value: "Failed to satisfy relay constraints.",
+                comment: ""
+            )
+
+        case .backgroundTaskScheduler:
+            // This error is never displayed anywhere
+            return nil
         }
     }
 }

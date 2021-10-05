@@ -8,80 +8,107 @@
 
 import Foundation
 
+/// Enum describing the state of the Promise lifecycle.
 private enum PromiseState<Value> {
-    case pending((PromiseResolver<Value>) -> Void, DispatchQueue?)
+    case pending((PromiseResolver<Value>) -> Void)
     case executing
-    case resolved(Value, DispatchQueue?)
+    case resolved(Value)
+    case cancelling
     case cancelled
 }
 
 /// Class describing a block of asynchronous computation that can either resolve or be cancelled.
-final class Promise<Value> {
+final class Promise<Value>: Cancellable {
     private var state: PromiseState<Value>
     private var observers: [AnyPromiseObserver<Value>] = []
     private let lock = NSRecursiveLock()
+
+    /// Execution queue used for running the Promise body.
+    private var executionQueue: DispatchQueue?
+
+    /// Completion queue used for delivering results to observers.
+    private var completionQueue: DispatchQueue?
+
+    /// Parent promise.
+    private var parent: Cancellable?
+
+    /// Cancellation handler.
+    private var cancelHandler: (() -> Void)?
 
     /// Returns Promise resolved with the given value.
     class func resolved(_ value: Value) -> Self {
         return Self.init(value: value)
     }
 
+    /// Returns Promise with lazily resolved value.
+    class func deferred(_ producer: @escaping () -> Value) -> Self {
+        return Self.init { resolver in
+            resolver.resolve(value: producer())
+        }
+    }
+
     /// Initialize Promise with the execution block.
     init(body: @escaping (PromiseResolver<Value>) -> Void) {
-        state = .pending(body, nil)
+        state = .pending(body)
+    }
+
+    /// Initialize Promise with the execution block and parent.
+    init(parent aParent: Cancellable?, body: @escaping (PromiseResolver<Value>) -> Void) {
+        state = .pending(body)
+        parent = aParent
     }
 
     /// Initialize resolved Promise with the given value.
     init(value: Value) {
-        state = .resolved(value, nil)
+        state = .resolved(value)
     }
 
     deinit {
         switch state {
-        case .resolved, .cancelled:
+        case .resolved, .cancelled, .pending:
             break
-        case .pending, .executing:
+        case .executing, .cancelling:
             preconditionFailure("\(Self.self) is deallocated in \(state) state without being resolved or cancelled.")
         }
     }
 
     /// Observe the result of Promise.
     /// This method starts the promise execution if it hasn't started yet.
-    @discardableResult
-    func observe(_ receiveCompletion: @escaping (PromiseCompletion<Value>) -> Void) -> Self {
+    func observe(_ receiveCompletion: @escaping (PromiseCompletion<Value>) -> Void) {
         return lock.withCriticalBlock {
             switch state {
-            case .resolved(let value, let queue):
+            case .resolved(let value):
                 let completion = PromiseCompletion<Value>.finished(value)
-                queue?.async { receiveCompletion(completion) } ?? receiveCompletion(completion)
+                completionQueue?.async { receiveCompletion(completion) } ?? receiveCompletion(completion)
 
             case .cancelled:
-                receiveCompletion(.cancelled)
+                let completion = PromiseCompletion<Value>.cancelled
+                completionQueue?.async { receiveCompletion(completion) } ?? receiveCompletion(completion)
 
             case .pending:
                 observers.append(AnyPromiseObserver<Value>(receiveCompletion))
                 execute()
 
-            case .executing:
+            case .executing, .cancelling:
                 observers.append(AnyPromiseObserver<Value>(receiveCompletion))
             }
-            return self
         }
     }
 
     /// Cancel Promise.
-    /// When Promise is cancelled, all downstream Promises pending execution are also cancelled.
     func cancel() {
         lock.withCriticalBlock {
             switch state {
-            case .pending, .executing:
+            case .pending:
                 state = .cancelled
-                observers.forEach { observer in
-                    observer.receiveCompletion(.cancelled)
-                }
-                observers.removeAll()
 
-            case .cancelled, .resolved:
+            case .executing:
+                state = .cancelling
+
+                parent?.cancel()
+                triggerCancelHandler()
+
+            case .cancelling, .cancelled, .resolved:
                 break
             }
         }
@@ -89,13 +116,20 @@ final class Promise<Value> {
 
     /// Trasform the value by producing a promise.
     func then<NewValue>(_ onResolve: @escaping (Value) -> Promise<NewValue>) -> Promise<NewValue> {
-        return Promise<NewValue> { resolver in
-            _ = self.observe { completion in
+        return Promise<NewValue>(parent: self) { resolver in
+            self.observe { completion in
                 switch completion {
                 case .finished(let value):
-                    _ = onResolve(value).observe { completion in
+                    let child = onResolve(value)
+
+                    resolver.setCancelHandler {
+                        child.cancel()
+                    }
+
+                    child.observe { completion in
                         resolver.resolve(completion: completion)
                     }
+
                 case .cancelled:
                     resolver.resolve(completion: .cancelled)
                 }
@@ -103,10 +137,10 @@ final class Promise<Value> {
         }
     }
 
-    /// Transform the value.
+    /// Transform the value producing new value.
     func then<NewValue>(_ onResolve: @escaping (Value) -> NewValue) -> Promise<NewValue> {
-        return Promise<NewValue> { resolver in
-            _ = self.observe { completion in
+        return Promise<NewValue>(parent: self) { resolver in
+            self.observe { completion in
                 resolver.resolve(completion: completion.map(onResolve))
             }
         }
@@ -121,13 +155,22 @@ final class Promise<Value> {
         return self
     }
 
+    /// Returns a Promise that does not propagate cancellation to the parent.
+    func doNotPropagateCancellation() -> Promise<Value> {
+        return Promise { resolver in
+            self.observe { completion in
+                resolver.resolve(completion: completion)
+            }
+        }
+    }
+
     /// Set the queue on which to execute the promise's body block.
     func schedule(on queue: DispatchQueue) -> Self {
         return lock.withCriticalBlock {
             switch state {
-            case .pending(let block, _):
-                state = .pending(block, queue)
-            case .cancelled, .executing, .resolved:
+            case .pending:
+                executionQueue = queue
+            case .cancelling, .cancelled, .executing, .resolved:
                 break
             }
             return self
@@ -152,7 +195,7 @@ final class Promise<Value> {
         defer { condition.unlock() }
 
         var returnValue: PromiseCompletion<Value>!
-        _ = observe { completion in
+        observe { completion in
             returnValue = completion
             condition.signal()
         }
@@ -161,16 +204,30 @@ final class Promise<Value> {
         return returnValue
     }
 
+    // MARK: - Private
+
     /// Execute the promise's body if still pending execution.
     private func execute() {
         lock.withCriticalBlock {
-            guard case .pending(let block, let queue) = state else { return }
+            guard case .pending(let block) = state else { return }
 
             state = .executing
 
             let resolver = PromiseResolver(promise: self)
 
-            queue?.async { block(resolver) } ?? block(resolver)
+            executionQueue?.async { block(resolver) } ?? block(resolver)
+        }
+    }
+
+    /// Resolve Promise with `PromiseCompletion`.
+    fileprivate func resolve(completion: PromiseCompletion<Value>, queue: DispatchQueue?) {
+        lock.withCriticalBlock {
+            switch completion {
+            case .finished(let value):
+                resolve(value: value, queue: queue)
+            case .cancelled:
+                resolveCancelled(queue: queue)
+            }
         }
     }
 
@@ -179,84 +236,121 @@ final class Promise<Value> {
     /// Provide the optional `queue` parameter which will be used to dispatch the resolved value to observers added
     /// after the promise was already resolved. When providing a `queue`, the call to `resolve()` must happen on
     /// the same queue.
-    fileprivate func resolve(value: Value, queue: DispatchQueue?) {
+    private func resolve(value: Value, queue: DispatchQueue?) {
         lock.withCriticalBlock {
             switch state {
             case .pending, .executing:
                 // Oblige caller to resolve the value on the same queue.
                 queue.map { dispatchPrecondition(condition: .onQueue($0)) }
 
-                state = .resolved(value, queue)
+                completionQueue = queue
+                state = .resolved(value)
 
                 observers.forEach { observer in
                     observer.receiveCompletion(.finished(value))
                 }
                 observers.removeAll()
 
+            case .cancelling:
+                // Oblige caller to resolve the value on the same queue.
+                queue.map { dispatchPrecondition(condition: .onQueue($0)) }
+
+                completionQueue = queue
+                state = .cancelled
+
+                observers.forEach { observer in
+                    observer.receiveCompletion(.cancelled)
+                }
+                observers.removeAll()
+
             case .cancelled, .resolved:
                 break
             }
+        }
+    }
 
+    private func resolveCancelled(queue: DispatchQueue?) {
+        lock.withCriticalBlock {
+            switch state {
+            case .pending, .executing, .cancelling:
+                // Oblige caller to resolve the value on the same queue.
+                queue.map { dispatchPrecondition(condition: .onQueue($0)) }
+
+                completionQueue = queue
+                state = .cancelled
+
+                observers.forEach { observer in
+                    observer.receiveCompletion(.cancelled)
+                }
+                observers.removeAll()
+
+            case .cancelled, .resolved:
+                break
+            }
+        }
+    }
+
+    /// Set cancellation handler.
+    fileprivate func setCancelHandler(_ handler: @escaping () -> Void) {
+        lock.withCriticalBlock {
+            cancelHandler = handler
+        }
+    }
+
+    /// Trigger cancellation handler, then reset it.
+    private func triggerCancelHandler() {
+        lock.withCriticalBlock {
+            let cancelHandlerCopy = cancelHandler
+            cancelHandler = nil
+            cancelHandlerCopy?()
         }
     }
 
 }
 
 final class PromiseCancellationToken {
-    private let handler: () -> Void
-    fileprivate init(_ handler: @escaping () -> Void) {
-        self.handler = handler
+    private var handler: (() -> Void)?
+    private let lock = NSLock()
+
+    fileprivate init(_ aHandler: @escaping () -> Void) {
+        handler = aHandler
+    }
+
+    func cancel() {
+        lock.withCriticalBlock {
+            handler?()
+            handler = nil
+        }
     }
 
     deinit {
-        handler()
+        cancel()
     }
 }
 
 struct PromiseResolver<Value> {
+    /// Target promise.
     private let promise: Promise<Value>
 
     /// Private initializer.
-    fileprivate init(promise: Promise<Value>) {
-        self.promise = promise
+    fileprivate init(promise aPromise: Promise<Value>) {
+        promise = aPromise
     }
 
-    /// Resolve the promise with `PromiseCompletion`.
-    func resolve(completion: PromiseCompletion<Value>) {
-        resolve(completion: completion, queue: nil)
-    }
-
-    /// Resolve the promise with `PromiseCompletion` and ptiona queue on which to dispatch the value too observers added
-    /// after the promise was already resolved.
-    func resolve(completion: PromiseCompletion<Value>, queue: DispatchQueue?) {
-        switch completion {
-        case .finished(let value):
-            resolve(value: value, queue: queue)
-        case .cancelled:
-            promise.cancel()
-        }
-    }
-
-    /// Resolve Promise with the given value.
-    func resolve(value: Value) {
-        resolve(value: value, queue: nil)
+    /// Resolve the promise with `PromiseCompletion` and optional queue on which to dispatch the value to observers
+    /// added after the promise was already resolved.
+    func resolve(completion: PromiseCompletion<Value>, queue: DispatchQueue? = nil) {
+        promise.resolve(completion: completion, queue: queue)
     }
 
     /// Resolve the promise with the given value and optional queue on which to dispatch the value to observers added
     /// after the promise was already resolved.
-    fileprivate func resolve(value: Value, queue: DispatchQueue?) {
-        promise.resolve(value: value, queue: queue)
+    func resolve(value: Value, queue: DispatchQueue? = nil) {
+        promise.resolve(completion: .finished(value), queue: queue)
     }
 
     /// Set cancellation handler.
-    func setCancelHandler(_ cancellation: @escaping () -> Void) {
-        _ = promise.observe { completion in
-            switch completion {
-            case .finished:
-                break
-            case .cancelled:
-                cancellation()
-            }
-        }
+    func setCancelHandler(_ handler: @escaping () -> Void) {
+        promise.setCancelHandler(handler)
     }
 }

@@ -1,13 +1,18 @@
 use crate::{DaemonEventSender, InternalDaemonEvent};
 use chrono::offset::Utc;
-use mullvad_rpc::rest::{Error as RestError, MullvadRestHandle};
+use mullvad_rpc::{
+    availability::ApiAvailabilityHandle,
+    rest::{Error as RestError, MullvadRestHandle},
+};
 use mullvad_types::account::AccountToken;
 pub use mullvad_types::wireguard::*;
 use std::{future::Future, pin::Pin, time::Duration};
 
 use futures::future::{abortable, AbortHandle};
+#[cfg(not(target_os = "android"))]
+use talpid_core::future_retry::constant_interval;
 use talpid_core::{
-    future_retry::{retry_future_with_backoff, ExponentialBackoff, Jittered},
+    future_retry::{retry_future, retry_future_n, ExponentialBackoff, Jittered},
     mpsc::Sender,
 };
 
@@ -27,10 +32,17 @@ const RETRY_INTERVAL_INITIAL: Duration = Duration::from_secs(4);
 const RETRY_INTERVAL_FACTOR: u32 = 5;
 const RETRY_INTERVAL_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
+#[cfg(not(target_os = "android"))]
+const SHORT_RETRY_INTERVAL: Duration = Duration::ZERO;
+
+const MAX_KEY_REMOVAL_RETRIES: usize = 2;
+
 #[derive(err_derive::Error, Debug)]
 pub enum Error {
     #[error(display = "Unexpected HTTP request error")]
     RestError(#[error(source)] mullvad_rpc::rest::Error),
+    #[error(display = "API availability check was interrupted")]
+    ApiCheckError(#[error(source)] mullvad_rpc::availability::Error),
     #[error(display = "Account already has maximum number of keys")]
     TooManyKeys,
 }
@@ -39,6 +51,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct KeyManager {
     daemon_tx: DaemonEventSender,
+    availability_handle: ApiAvailabilityHandle,
     http_handle: MullvadRestHandle,
     current_job: Option<AbortHandle>,
 
@@ -47,9 +60,14 @@ pub struct KeyManager {
 }
 
 impl KeyManager {
-    pub(crate) fn new(daemon_tx: DaemonEventSender, http_handle: MullvadRestHandle) -> Self {
+    pub(crate) fn new(
+        daemon_tx: DaemonEventSender,
+        availability_handle: ApiAvailabilityHandle,
+        http_handle: MullvadRestHandle,
+    ) -> Self {
         Self {
             daemon_tx,
+            availability_handle,
             http_handle,
             current_job: None,
             abort_scheduler_tx: None,
@@ -127,17 +145,61 @@ impl KeyManager {
     }
 
     /// Removes a key from an account
+    #[cfg(not(target_os = "android"))]
     pub fn remove_key(
         &self,
         account: AccountToken,
         key: talpid_types::net::wireguard::PublicKey,
     ) -> impl Future<Output = Result<()>> {
+        self.remove_key_inner(account, key, constant_interval(SHORT_RETRY_INTERVAL), false)
+    }
+
+    /// Removes a key from an account
+    pub fn remove_key_with_backoff(
+        &self,
+        account: AccountToken,
+        key: talpid_types::net::wireguard::PublicKey,
+    ) -> impl Future<Output = Result<()>> {
+        let retry_strategy = Jittered::jitter(
+            ExponentialBackoff::new(RETRY_INTERVAL_INITIAL, RETRY_INTERVAL_FACTOR)
+                .max_delay(RETRY_INTERVAL_MAX),
+        );
+        self.remove_key_inner(account, key, retry_strategy, true)
+    }
+
+    fn remove_key_inner<D: Iterator<Item = Duration> + 'static>(
+        &self,
+        account: AccountToken,
+        key: talpid_types::net::wireguard::PublicKey,
+        retry_strategy: D,
+        offline_check: bool,
+    ) -> impl Future<Output = Result<()>> {
         let mut rpc = mullvad_rpc::WireguardKeyProxy::new(self.http_handle.clone());
-        async move {
-            rpc.remove_wireguard_key(account, &key)
-                .await
-                .map_err(Self::map_rpc_error)
-        }
+        let api_handle = self.availability_handle.clone();
+        let api_handle_2 = api_handle.clone();
+        let future = retry_future_n(
+            move || {
+                let remove_key = rpc.remove_wireguard_key(account.clone(), key.clone());
+                let wait_future = api_handle.wait_online();
+                async move {
+                    if offline_check {
+                        let _ = wait_future.await;
+                    }
+                    remove_key.await
+                }
+            },
+            move |result| match result {
+                Ok(_) => false,
+                Err(error) => Self::should_retry_removal(error, &api_handle_2),
+            },
+            retry_strategy,
+            MAX_KEY_REMOVAL_RETRIES,
+        );
+        async move { future.await.map_err(Self::map_rpc_error) }
+    }
+
+    fn should_retry_removal(error: &RestError, api_handle: &ApiAvailabilityHandle) -> bool {
+        error.is_network_error() && !api_handle.get_state().is_offline()
     }
 
     fn should_retry(error: &RestError) -> bool {
@@ -164,11 +226,22 @@ impl KeyManager {
         let mut inner_future_generator =
             self.push_future_generator(account.clone(), private_key, timeout);
 
+        let availability_handle = self.availability_handle.clone();
+
         let future_generator = move || {
+            let wait_available = availability_handle.wait_available();
             let fut = inner_future_generator();
             let error_tx = error_tx.clone();
             let error_account = error_account.clone();
             async move {
+                let error_account_copy = error_account.clone();
+                wait_available.await.map_err(|error| {
+                    let _ = error_tx.send(InternalDaemonEvent::WgKeyEvent((
+                        error_account_copy,
+                        Err(Error::ApiCheckError(error)),
+                    )));
+                    false
+                })?;
                 let response = fut.await;
                 match response {
                     Ok(addresses) => Ok(addresses),
@@ -196,8 +269,7 @@ impl KeyManager {
             }
         };
 
-        let upload_future =
-            retry_future_with_backoff(future_generator, should_retry, retry_strategy);
+        let upload_future = retry_future(future_generator, should_retry, retry_strategy);
 
 
         let (cancellable_upload, abort_handle) = abortable(Box::pin(upload_future));
@@ -299,6 +371,7 @@ impl KeyManager {
 
     async fn create_automatic_rotation(
         daemon_tx: DaemonEventSender,
+        availability_handle: ApiAvailabilityHandle,
         http_handle: MullvadRestHandle,
         mut public_key: PublicKey,
         rotation_interval_secs: u64,
@@ -306,14 +379,20 @@ impl KeyManager {
     ) {
         tokio::time::sleep(ROTATION_START_DELAY).await;
 
-        let rotate_key_for_account = move |old_key: &PublicKey| {
-            Self::rotate_key(
-                daemon_tx.clone(),
-                http_handle.clone(),
-                account_token.clone(),
-                old_key.clone(),
-            )
-        };
+        let rotate_key_for_account =
+            move |old_key: &PublicKey| -> Pin<Box<dyn Future<Output = Result<PublicKey>> + Send>> {
+                let wait_available = availability_handle.wait_available();
+                let rotate = Self::rotate_key(
+                    daemon_tx.clone(),
+                    http_handle.clone(),
+                    account_token.clone(),
+                    old_key.clone(),
+                );
+                Box::pin(async move {
+                    wait_available.await?;
+                    rotate.await
+                })
+            };
 
         loop {
             Self::wait_for_key_expiry(&public_key, rotation_interval_secs).await;
@@ -341,12 +420,12 @@ impl KeyManager {
         http_handle: MullvadRestHandle,
         account_token: AccountToken,
         old_key: PublicKey,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<PublicKey>> + Send>> {
+    ) -> impl Future<Output = Result<PublicKey>> {
         let new_key = PrivateKey::new_from_random();
         let rpc_result =
             Self::replace_key_rpc(http_handle, account_token.clone(), old_key, new_key);
 
-        Box::pin(async move {
+        async move {
             match rpc_result.await {
                 Ok(data) => {
                     // Update account data
@@ -365,7 +444,7 @@ impl KeyManager {
                 }
                 Err(unknown) => Err(unknown),
             }
-        })
+        }
     }
 
     async fn rotate_key_with_retries<F>(old_key: PublicKey, rotate_key: F) -> Result<PublicKey>
@@ -388,7 +467,7 @@ impl KeyManager {
             }
         };
 
-        retry_future_with_backoff(
+        retry_future(
             move || rotate_key.clone()(&old_key),
             should_retry,
             retry_strategy,
@@ -403,6 +482,7 @@ impl KeyManager {
         // Schedule cancellable series of repeating rotation tasks
         let fut = Self::create_automatic_rotation(
             self.daemon_tx.clone(),
+            self.availability_handle.clone(),
             self.http_handle.clone(),
             public_key,
             self.auto_rotation_interval.as_duration().as_secs(),

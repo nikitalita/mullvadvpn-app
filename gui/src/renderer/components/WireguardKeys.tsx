@@ -68,7 +68,7 @@ export default class WireguardKeys extends React.Component<IProps, IState> {
 
   public componentDidMount() {
     this.verifyKey();
-    this.keyAgeUpdateInterval = setInterval(this.setAgeOfKeyStringState, 60 * 1000);
+    this.keyAgeUpdateInterval = window.setInterval(this.setAgeOfKeyStringState, 60 * 1000);
   }
 
   public componentWillUnmount() {
@@ -279,7 +279,8 @@ export default class WireguardKeys extends React.Component<IProps, IState> {
     switch (keyState.type) {
       case 'key-set':
       case 'being-verified': {
-        return formatRelativeDate(new Date(), keyState.key.created, true);
+        const createdDate = Math.min(Date.parse(keyState.key.created), Date.now());
+        return formatRelativeDate(new Date(), createdDate, true);
       }
       default:
         return '-';

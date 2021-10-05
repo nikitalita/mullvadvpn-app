@@ -2,10 +2,14 @@ use super::{
     stats::{Stats, StatsMap},
     Config, Tunnel, TunnelError,
 };
-use crate::tunnel::{
-    tun_provider::TunProvider,
-    wireguard::logging::{clean_up_logging, initialize_logging, logging_callback, WgLogLevel},
+#[cfg(windows)]
+use crate::routing;
+#[cfg(not(windows))]
+use crate::tunnel::tun_provider::TunProvider;
+use crate::tunnel::wireguard::logging::{
+    clean_up_logging, initialize_logging, wg_go_logging_callback, WgLogLevel,
 };
+#[cfg(not(windows))]
 use ipnetwork::IpNetwork;
 use std::{
     ffi::{c_void, CStr},
@@ -56,6 +60,8 @@ pub struct WgGoTunnel {
     _tunnel_device: Tun,
     // context that maps to fs::File instance, used with logging callback
     _logging_context: LoggingContext,
+    #[cfg(target_os = "windows")]
+    _route_callback_handle: Option<crate::winnet::WinNetCallbackHandle>,
 }
 
 impl WgGoTunnel {
@@ -75,34 +81,18 @@ impl WgGoTunnel {
             .map_err(TunnelError::LoggingError)?;
 
         #[cfg(not(target_os = "android"))]
+        let mtu = config.mtu as isize;
         let handle = unsafe {
             wgTurnOn(
-                config.mtu as isize,
+                #[cfg(not(target_os = "android"))]
+                mtu,
                 wg_config_str.as_ptr() as *const i8,
                 tunnel_fd,
-                Some(logging_callback),
+                Some(wg_go_logging_callback),
                 logging_context.0 as *mut libc::c_void,
             )
         };
-
-        #[cfg(target_os = "android")]
-        let handle = unsafe {
-            wgTurnOn(
-                wg_config_str.as_ptr() as *const i8,
-                tunnel_fd,
-                Some(logging_callback),
-                logging_context.0 as *mut libc::c_void,
-            )
-        };
-
-        if handle < 0 {
-            // Error values returned from the wireguard-go library
-            return match handle {
-                -1 => Err(TunnelError::FatalStartWireguardError),
-                -2 => Err(TunnelError::RecoverableStartWireguardError),
-                _ => unreachable!("Unknown status code returned from wireguard-go"),
-            };
-        }
+        check_wg_status(handle)?;
 
         #[cfg(target_os = "android")]
         Self::bypass_tunnel_sockets(&mut tunnel_device, handle)
@@ -120,9 +110,15 @@ impl WgGoTunnel {
     pub fn start_tunnel(
         config: &Config,
         log_path: Option<&Path>,
-        _tun_provider: &mut TunProvider,
-        _routes: impl Iterator<Item = IpNetwork>,
+        route_manager: &mut routing::RouteManager,
     ) -> Result<Self> {
+        let route_callback_handle = route_manager
+            .add_default_route_callback(Some(WgGoTunnel::default_route_changed_callback), ())
+            .ok();
+        if route_callback_handle.is_none() {
+            log::warn!("Failed to register default route callback");
+        }
+
         let wg_config_str = config.to_userspace_format();
         let iface_name: String = "Mullvad".to_string();
         let cstr_iface_name =
@@ -149,14 +145,11 @@ impl WgGoTunnel {
                 wg_config_str.as_ptr(),
                 &mut alias_ptr,
                 &mut interface_luid,
-                Some(logging_callback),
+                Some(wg_go_logging_callback),
                 logging_context.0 as *mut libc::c_void,
             )
         };
-
-        if handle < 0 {
-            return Err(TunnelError::FatalStartWireguardError);
-        }
+        check_wg_status(handle)?;
 
         let actual_iface_name = {
             let actual_iface_name_c = unsafe { CStr::from_ptr(alias_ptr) };
@@ -175,6 +168,7 @@ impl WgGoTunnel {
             interface_luid,
             handle: Some(handle),
             _logging_context: logging_context,
+            _route_callback_handle: route_callback_handle,
         })
     }
 
@@ -343,6 +337,18 @@ impl Tunnel for WgGoTunnel {
     }
 }
 
+fn check_wg_status(wg_code: i32) -> Result<()> {
+    match wg_code {
+        ERROR_GENERAL_FAILURE => Err(TunnelError::FatalStartWireguardError),
+        ERROR_INTERMITTENT_FAILURE => Err(TunnelError::RecoverableStartWireguardError),
+        0.. => Ok(()),
+        _ => {
+            log::error!("Unknown status code returned from wireguard-go");
+            Err(TunnelError::FatalStartWireguardError)
+        }
+    }
+}
+
 #[cfg(unix)]
 pub type Fd = std::os::unix::io::RawFd;
 
@@ -351,6 +357,9 @@ pub type LoggingCallback = unsafe extern "system" fn(
     msg: *const libc::c_char,
     context: *mut libc::c_void,
 );
+
+const ERROR_GENERAL_FAILURE: i32 = -1;
+const ERROR_INTERMITTENT_FAILURE: i32 = -2;
 
 extern "C" {
     /// Creates a new wireguard tunnel, uses the specific interface name, MTU and file descriptors

@@ -10,7 +10,6 @@ use crate::{
     },
 };
 use futures::channel::mpsc;
-use lazy_static::lazy_static;
 use std::{
     convert::TryFrom,
     ffi::{OsStr, OsString},
@@ -34,10 +33,7 @@ use winapi::{
 };
 
 const DRIVER_EVENT_BUFFER_SIZE: usize = 2048;
-
-lazy_static! {
-    static ref RESERVED_IP_V4: Ipv4Addr = "192.0.2.123".parse().unwrap();
-}
+const RESERVED_IP_V4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 123);
 
 /// Errors that may occur in [`SplitTunnel`].
 #[derive(err_derive::Error, Debug)]
@@ -438,52 +434,29 @@ impl SplitTunnel {
             }
         }
 
-        // Identify IP address that gives us Internet access
-        let internet_ipv4 = get_best_default_route(WinNetAddrFamily::IPV4)
-            .map_err(Error::ObtainDefaultRoute)?
-            .map(|route| interface_luid_to_ip(WinNetAddrFamily::IPV4, route.interface_luid))
-            .transpose()
-            .map_err(Error::LuidToIp)?
-            .flatten();
-        let internet_ipv6 = get_best_default_route(WinNetAddrFamily::IPV6)
-            .map_err(Error::ObtainDefaultRoute)?
-            .map(|route| interface_luid_to_ip(WinNetAddrFamily::IPV6, route.interface_luid))
-            .transpose()
-            .map_err(Error::LuidToIp)?
-            .flatten();
+        let tunnel_ipv4 = Some(tunnel_ipv4.unwrap_or(RESERVED_IP_V4));
+        let context_mutex = Arc::new(Mutex::new(
+            SplitTunnelDefaultRouteChangeHandlerContext::new(
+                self.request_tx.clone(),
+                self.daemon_tx.clone(),
+                tunnel_ipv4,
+                tunnel_ipv6,
+            ),
+        ));
 
-        let tunnel_ipv4 = Some(tunnel_ipv4.unwrap_or(*RESERVED_IP_V4));
-        let internet_ipv4 = internet_ipv4
-            .map(|addr| Ipv4Addr::try_from(addr).map_err(|_| Error::IpParseError))
-            .transpose()?;
-        let internet_ipv6 = internet_ipv6
-            .map(|addr| Ipv6Addr::try_from(addr).map_err(|_| Error::IpParseError))
-            .transpose()?;
-
-        let context = SplitTunnelDefaultRouteChangeHandlerContext::new(
-            self.request_tx.clone(),
-            self.daemon_tx.clone(),
-            tunnel_ipv4,
-            tunnel_ipv6,
-            internet_ipv4,
-            internet_ipv6,
-        );
 
         self._route_change_callback = None;
-
-        self.send_request(Request::RegisterIps(
-            tunnel_ipv4,
-            tunnel_ipv6,
-            internet_ipv4,
-            internet_ipv6,
-        ))?;
-
-        self._route_change_callback = winnet::add_default_route_change_callback(
+        let mut context = context_mutex.lock().unwrap();
+        let callback = winnet::add_default_route_change_callback(
             Some(split_tunnel_default_route_change_handler),
-            context,
+            context_mutex.clone(),
         )
         .map(Some)
         .map_err(|_| Error::RegisterRouteChangeCallback)?;
+
+        context.initialize_internet_addresses()?;
+        context.register_ips()?;
+        self._route_change_callback = callback;
 
         Ok(())
     }
@@ -530,16 +503,14 @@ impl SplitTunnelDefaultRouteChangeHandlerContext {
         daemon_tx: Weak<mpsc::UnboundedSender<TunnelCommand>>,
         tunnel_ipv4: Option<Ipv4Addr>,
         tunnel_ipv6: Option<Ipv6Addr>,
-        internet_ipv4: Option<Ipv4Addr>,
-        internet_ipv6: Option<Ipv6Addr>,
     ) -> Self {
         SplitTunnelDefaultRouteChangeHandlerContext {
             request_tx,
             daemon_tx,
             tunnel_ipv4,
             tunnel_ipv6,
-            internet_ipv4,
-            internet_ipv6,
+            internet_ipv4: None,
+            internet_ipv6: None,
         }
     }
 
@@ -554,6 +525,30 @@ impl SplitTunnelDefaultRouteChangeHandlerContext {
             ),
         )
     }
+
+    pub fn initialize_internet_addresses(&mut self) -> Result<(), Error> {
+        // Identify IP address that gives us Internet access
+        let internet_ipv4 = get_best_default_route(WinNetAddrFamily::IPV4)
+            .map_err(Error::ObtainDefaultRoute)?
+            .map(|route| interface_luid_to_ip(WinNetAddrFamily::IPV4, route.interface_luid))
+            .transpose()
+            .map_err(Error::LuidToIp)?
+            .flatten();
+        let internet_ipv6 = get_best_default_route(WinNetAddrFamily::IPV6)
+            .map_err(Error::ObtainDefaultRoute)?
+            .map(|route| interface_luid_to_ip(WinNetAddrFamily::IPV6, route.interface_luid))
+            .transpose()
+            .map_err(Error::LuidToIp)?
+            .flatten();
+
+        self.internet_ipv4 = internet_ipv4
+            .map(|addr| Ipv4Addr::try_from(addr).map_err(|_| Error::IpParseError))
+            .transpose()?;
+        self.internet_ipv6 = internet_ipv6
+            .map(|addr| Ipv6Addr::try_from(addr).map_err(|_| Error::IpParseError))
+            .transpose()?;
+        Ok(())
+    }
 }
 
 unsafe extern "system" fn split_tunnel_default_route_change_handler(
@@ -563,7 +558,8 @@ unsafe extern "system" fn split_tunnel_default_route_change_handler(
     ctx: *mut libc::c_void,
 ) {
     // Update the "internet interface" IP when best default route changes
-    let ctx = &mut *(ctx as *mut SplitTunnelDefaultRouteChangeHandlerContext);
+    let ctx_mutex = &mut *(ctx as *mut Arc<Mutex<SplitTunnelDefaultRouteChangeHandlerContext>>);
+    let mut ctx = ctx_mutex.lock().expect("ST route handler mutex poisoned");
 
     let daemon_tx = ctx.daemon_tx.upgrade();
     let maybe_send = move |content| {
@@ -574,7 +570,7 @@ unsafe extern "system" fn split_tunnel_default_route_change_handler(
 
     let result = match event_type {
         winnet::WinNetDefaultRouteChangeEventType::DefaultRouteChanged => {
-            match interface_luid_to_ip(address_family.clone(), default_route.interface_luid) {
+            match interface_luid_to_ip(address_family, default_route.interface_luid) {
                 Ok(Some(ip)) => match IpAddr::from(ip) {
                     IpAddr::V4(addr) => ctx.internet_ipv4 = Some(addr),
                     IpAddr::V6(addr) => ctx.internet_ipv6 = Some(addr),

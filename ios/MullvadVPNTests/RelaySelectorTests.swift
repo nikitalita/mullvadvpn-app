@@ -12,61 +12,57 @@ import Network
 class RelaySelectorTests: XCTestCase {
 
     func testCountryConstraint() {
-        let relaySelector = RelaySelector(relays: sampleRelays)
         let constraints = RelayConstraints(location: .only(.country("es")))
 
-        let result = relaySelector.evaluate(with: constraints)
+        let result = RelaySelector.evaluate(relays: sampleRelays, constraints: constraints)
 
         XCTAssertEqual(result?.relay.hostname, "es1-wireguard")
     }
 
     func testCityConstraint() {
-        let relaySelector = RelaySelector(relays: sampleRelays)
         let constraints = RelayConstraints(location: .only(.city("se", "got")))
-
-        let result = relaySelector.evaluate(with: constraints)
+        let result = RelaySelector.evaluate(relays: sampleRelays, constraints: constraints)
 
         XCTAssertEqual(result?.relay.hostname, "se10-wireguard")
     }
 
     func testHostnameConstraint() {
-        let relaySelector = RelaySelector(relays: sampleRelays)
         let constraints = RelayConstraints(location: .only(.hostname("se", "sto", "se6-wireguard")))
 
-        let result = relaySelector.evaluate(with: constraints)
+        let result = RelaySelector.evaluate(relays: sampleRelays, constraints: constraints)
 
         XCTAssertEqual(result?.relay.hostname, "se6-wireguard")
     }
 
 }
 
-private let sampleRelays = ServerRelaysResponse(
+private let sampleRelays = REST.ServerRelaysResponse(
     locations: [
-        "es-mad": ServerLocation(
+        "es-mad": REST.ServerLocation(
             country: "Spain",
             city: "Madrid",
             latitude: 40.408566,
             longitude: -3.69222
         ),
-        "se-got": ServerLocation(
+        "se-got": REST.ServerLocation(
             country: "Sweden",
             city: "Gothenburg",
             latitude: 57.70887,
             longitude: 11.97456
         ),
-        "se-sto": ServerLocation(
+        "se-sto": REST.ServerLocation(
             country: "Sweden",
             city: "Stockholm",
             latitude: 59.3289,
             longitude: 18.0649
         )
     ],
-    wireguard: ServerWireguardTunnels(
+    wireguard: REST.ServerWireguardTunnels(
         ipv4Gateway: .loopback,
         ipv6Gateway: .loopback,
         portRanges: [53...53],
         relays: [
-            ServerRelay(
+            REST.ServerRelay(
                 hostname: "es1-wireguard",
                 active: true,
                 owned: true,
@@ -78,7 +74,7 @@ private let sampleRelays = ServerRelaysResponse(
                 publicKey: Data(),
                 includeInCountry: true
             ),
-            ServerRelay(
+            REST.ServerRelay(
                 hostname: "se10-wireguard",
                 active: true,
                 owned: true,
@@ -90,7 +86,7 @@ private let sampleRelays = ServerRelaysResponse(
                 publicKey: Data(),
                 includeInCountry: true
             ),
-            ServerRelay(
+            REST.ServerRelay(
                 hostname: "se2-wireguard",
                 active: true,
                 owned: true,
@@ -102,7 +98,7 @@ private let sampleRelays = ServerRelaysResponse(
                 publicKey: Data(),
                 includeInCountry: true
             ),
-            ServerRelay(
+            REST.ServerRelay(
                 hostname: "se6-wireguard",
                 active: true,
                 owned: true,

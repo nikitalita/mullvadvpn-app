@@ -1,4 +1,5 @@
-import { execFile } from 'child_process';
+import { exec, execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import {
   app,
   BrowserWindow,
@@ -8,12 +9,13 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
   Tray,
 } from 'electron';
 import os from 'os';
 import * as path from 'path';
 import { sprintf } from 'sprintf-js';
-import * as uuid from 'uuid';
+import util from 'util';
 import config from '../config.json';
 import { closeToExpiry, hasExpired } from '../shared/account-expiry';
 import { IApplication } from '../shared/application-types';
@@ -72,7 +74,9 @@ import { resolveBin } from './proc';
 import ReconnectionBackoff from './reconnection-backoff';
 import TrayIconController, { TrayIconType } from './tray-icon-controller';
 import WindowController from './window-controller';
-import { ITranslations } from '../shared/ipc-schema';
+import { ITranslations, MacOsScrollbarVisibility } from '../shared/ipc-schema';
+
+const execAsync = util.promisify(exec);
 
 // Only import split tunneling library on correct OS.
 const linuxSplitTunneling = process.platform === 'linux' && require('./linux-split-tunneling');
@@ -90,6 +94,8 @@ const IS_BETA = /^(\d{4})\.(\d+)-beta(\d+)$/;
 const UPDATE_NOTIFICATION_DISABLED = process.env.MULLVAD_DISABLE_UPDATE_NOTIFICATION === '1';
 
 const SANDBOX_DISABLED = app.commandLine.hasSwitch('no-sandbox');
+
+const ALLOWED_PERMISSIONS = ['clipboard-sanitized-write'];
 
 enum AppQuitStage {
   unready,
@@ -148,6 +154,7 @@ class ApplicationMain {
         },
         wireguardConstraints: {
           port: 'any',
+          ipVersion: 'any',
         },
       },
     },
@@ -234,6 +241,8 @@ class ApplicationMain {
   private translations: ITranslations = { locale: this.locale };
 
   private windowsSplitTunnelingApplications?: IApplication[];
+
+  private macOsScrollbarVisibility?: MacOsScrollbarVisibility;
 
   public run() {
     // Remove window animations to combat window flickering when opening window. Can be removed when
@@ -327,7 +336,8 @@ class ApplicationMain {
         log.addOutput(new FileOutput(LogLevel.debug, mainLogPath));
         this.rendererLog.addOutput(new FileOutput(LogLevel.debug, rendererLogPath));
       } catch (e) {
-        console.error('Failed to initialize logging:', e);
+        const error = e as Error;
+        console.error('Failed to initialize logging:', error);
       }
     }
 
@@ -371,7 +381,8 @@ class ApplicationMain {
         await this.daemonRpc.disconnectTunnel();
         log.info('Disconnected the tunnel');
       } catch (e) {
-        log.error(`Failed to disconnect the tunnel: ${e.message}`);
+        const error = e as Error;
+        log.error(`Failed to disconnect the tunnel: ${error.message}`);
       }
     } else {
       log.info('Cannot close the tunnel because there is no active connection to daemon.');
@@ -385,7 +396,8 @@ class ApplicationMain {
         log.info('Unsubscribed from the daemon events');
       }
     } catch (e) {
-      log.error(`Failed to unsubscribe from daemon events: ${e.message}`);
+      const error = e as Error;
+      log.error(`Failed to unsubscribe from daemon events: ${error.message}`);
     }
 
     // The window is not closable on macOS to be able to hide the titlebar and workaround
@@ -403,7 +415,8 @@ class ApplicationMain {
       try {
         logger?.dispose();
       } catch (e) {
-        console.error('Failed to dispose logger:', e);
+        const error = e as Error;
+        console.error('Failed to dispose logger:', error);
       }
     }
   }
@@ -427,8 +440,8 @@ class ApplicationMain {
     this.blockPermissionRequests();
     // Blocks any http(s) and file requests that aren't supposed to happen.
     this.blockRequests();
-    // Blocks navigation since it's not needed.
-    this.blockNavigation();
+    // Blocks navigation and window.open since it's not needed.
+    this.blockNavigationAndWindowOpen();
 
     this.updateCurrentLocale();
 
@@ -436,6 +449,13 @@ class ApplicationMain {
       new ConnectionObserver(this.onDaemonConnected, this.onDaemonDisconnected),
     );
     this.connectToDaemon();
+
+    if (process.platform === 'darwin') {
+      await this.updateMacOsScrollbarVisibility();
+      systemPreferences.subscribeNotification('AppleShowScrollBarsSettingChanged', async () => {
+        await this.updateMacOsScrollbarVisibility();
+      });
+    }
 
     const window = await this.createWindow();
     const tray = this.createTray();
@@ -508,7 +528,8 @@ class ApplicationMain {
       const filePath = path.resolve(path.join(__dirname, '../renderer/index.html'));
       try {
         await this.windowController.window.loadFile(filePath);
-      } catch (error) {
+      } catch (e) {
+        const error = e as Error;
         log.error(`Failed to load index file: ${error.message}`);
       }
 
@@ -529,7 +550,8 @@ class ApplicationMain {
     // subscribe to events
     try {
       this.daemonEventListener = this.subscribeEvents();
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to subscribe: ${error.message}`);
 
       return this.recoverFromBootstrapError(error);
@@ -538,7 +560,8 @@ class ApplicationMain {
     // fetch account history
     try {
       this.setAccountHistory(await this.daemonRpc.getAccountHistory());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch the account history: ${error.message}`);
 
       return this.recoverFromBootstrapError(error);
@@ -547,7 +570,8 @@ class ApplicationMain {
     // fetch the tunnel state
     try {
       this.setTunnelState(await this.daemonRpc.getState());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch the tunnel state: ${error.message}`);
 
       return this.recoverFromBootstrapError(error);
@@ -556,7 +580,8 @@ class ApplicationMain {
     // fetch settings
     try {
       this.setSettings(await this.daemonRpc.getSettings());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch settings: ${error.message}`);
 
       return this.recoverFromBootstrapError(error);
@@ -573,7 +598,8 @@ class ApplicationMain {
         this.settings.relaySettings,
         this.settings.bridgeState,
       );
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch relay locations: ${error.message}`);
 
       return this.recoverFromBootstrapError(error);
@@ -582,7 +608,8 @@ class ApplicationMain {
     // fetch the daemon's version
     try {
       this.setDaemonVersion(await this.daemonRpc.getCurrentVersion());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch the daemon's version: ${error.message}`);
 
       return this.recoverFromBootstrapError(error);
@@ -991,7 +1018,8 @@ class ApplicationMain {
   private async fetchLatestVersion() {
     try {
       this.setLatestVersion(await this.daemonRpc.getVersionInfo());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to request the version info: ${error.message}`);
     }
   }
@@ -1032,7 +1060,7 @@ class ApplicationMain {
 
   private registerWindowListener(windowController: WindowController) {
     windowController.window?.on('focus', () => {
-      IpcMainEventChannel.windowFocus.notify(windowController.webContents, true);
+      IpcMainEventChannel.window.notifyFocus(windowController.webContents, true);
 
       this.blurNavigationResetScheduler.cancel();
 
@@ -1049,7 +1077,7 @@ class ApplicationMain {
     });
 
     windowController.window?.on('blur', () => {
-      IpcMainEventChannel.windowFocus.notify(windowController.webContents, false);
+      IpcMainEventChannel.window.notifyFocus(windowController.webContents, false);
 
       // ensure notification guard is reset
       this.notificationController.resetTunnelStateAnnouncements();
@@ -1087,6 +1115,7 @@ class ApplicationMain {
       wireguardPublicKey: this.wireguardPublicKey,
       translations: this.translations,
       windowsSplitTunnelingApplications: this.windowsSplitTunnelingApplications,
+      macOsScrollbarVisibility: this.macOsScrollbarVisibility,
     }));
 
     IpcMainEventChannel.settings.handleSetAllowLan((allowLan: boolean) =>
@@ -1262,7 +1291,7 @@ class ApplicationMain {
     });
 
     IpcMainEventChannel.problemReport.handleCollectLogs((toRedact) => {
-      const id = uuid.v4();
+      const id = randomUUID();
       const reportPath = this.getProblemReportPath(id);
       const executable = resolveBin('mullvad-problem-report');
       const args = ['collect', '--output', reportPath];
@@ -1339,7 +1368,8 @@ class ApplicationMain {
   private async createNewAccount(): Promise<string> {
     try {
       return await this.daemonRpc.createNewAccount();
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to create account: ${error.message}`);
       throw error;
     }
@@ -1363,7 +1393,8 @@ class ApplicationMain {
           AUTO_CONNECT_FALLBACK_DELAY,
         );
       }
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to login: ${error.message}`);
 
       this.autoConnectOnWireguardKeyEvent = false;
@@ -1396,7 +1427,8 @@ class ApplicationMain {
           log.info('Autoconnect the tunnel');
 
           await this.daemonRpc.connectTunnel();
-        } catch (error) {
+        } catch (e) {
+          const error = e as Error;
           log.error(`Failed to autoconnect the tunnel: ${error.message}`);
         }
       } else {
@@ -1413,7 +1445,8 @@ class ApplicationMain {
 
       this.autoConnectFallbackScheduler.cancel();
       this.accountExpiryNotificationScheduler.cancel();
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.info(`Failed to logout: ${error.message}`);
 
       throw error;
@@ -1493,7 +1526,8 @@ class ApplicationMain {
   private async updateAccountHistory(): Promise<void> {
     try {
       this.setAccountHistory(await this.daemonRpc.getAccountHistory());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch the account history: ${error.message}`);
     }
   }
@@ -1501,7 +1535,8 @@ class ApplicationMain {
   private async fetchWireguardKey(): Promise<void> {
     try {
       this.setWireguardKey(await this.daemonRpc.getWireguardKey());
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to fetch wireguard key: ${error.message}`);
     }
   }
@@ -1522,7 +1557,8 @@ class ApplicationMain {
       }
 
       this.updateDaemonsAutoConnect();
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(
         `Failed to update the autostart to ${autoStart.toString()}. ${error.message.toString()}`,
       );
@@ -1563,7 +1599,9 @@ class ApplicationMain {
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
       callback(false);
     });
-    session.defaultSession.setPermissionCheckHandler(() => false);
+    session.defaultSession.setPermissionCheckHandler((_webContents, permission) =>
+      ALLOWED_PERMISSIONS.includes(permission),
+    );
   }
 
   // Since the app frontend never performs any network requests, all requests originating from the
@@ -1614,11 +1652,11 @@ class ApplicationMain {
     );
   }
 
-  private blockNavigation() {
+  // Blocks navigation and window.open since it's not needed.
+  private blockNavigationAndWindowOpen() {
     app.on('web-contents-created', (_event, contents) => {
-      contents.on('will-navigate', (event) => {
-        event.preventDefault();
-      });
+      contents.on('will-navigate', (event) => event.preventDefault());
+      contents.setWindowOpenHandler(() => ({ action: 'deny' }));
     });
   }
 
@@ -1632,7 +1670,8 @@ class ApplicationMain {
       await installer(REACT_DEVELOPER_TOOLS, options);
       await installer(REDUX_DEVTOOLS, options);
     } catch (e) {
-      log.info(`Error installing extension: ${e.message}`);
+      const error = e as Error;
+      log.info(`Error installing extension: ${error.message}`);
     }
   }
 
@@ -1686,7 +1725,6 @@ class ApplicationMain {
         nodeIntegration: false,
         nodeIntegrationInWorker: false,
         nodeIntegrationInSubFrames: false,
-        enableRemoteModule: false,
         sandbox: !SANDBOX_DISABLED,
         contextIsolation: true,
         spellcheck: false,
@@ -1894,17 +1932,21 @@ class ApplicationMain {
       }
       this.tray?.on('click', () => this.windowController?.show());
     } else {
-      this.tray?.on('click', () => {
-        const isMacOsBigSur = process.platform === 'darwin' && parseInt(os.release(), 10) >= 20;
-        if (isMacOsBigSur && !this.windowController?.isVisible()) {
-          // This is a workaround for this Electron issue, when it's resolved
-          // `this.windowController?.toggle()` should do the trick on all platforms:
-          // https://github.com/electron/electron/issues/28776
-          const contextMenu = Menu.buildFromTemplate([]);
-          contextMenu.on('menu-will-show', () => this.windowController?.show());
-          this.tray?.popUpContextMenu(contextMenu);
-        } else {
-          this.windowController?.toggle();
+      this.tray?.on('click', (event) => {
+        // The app shouldn't become visible if the user is reordering the tray icons on macOS. The
+        // tray icon becomes draggable when holding the command key (meta).
+        if (process.platform !== 'darwin' || !event.metaKey) {
+          const isMacOsBigSur = process.platform === 'darwin' && parseInt(os.release(), 10) >= 20;
+          if (isMacOsBigSur && !this.windowController?.isVisible()) {
+            // This is a workaround for this Electron issue, when it's resolved
+            // `this.windowController?.toggle()` should do the trick on all platforms:
+            // https://github.com/electron/electron/issues/28776
+            const contextMenu = Menu.buildFromTemplate([]);
+            contextMenu.on('menu-will-show', () => this.windowController?.show());
+            this.tray?.popUpContextMenu(contextMenu);
+          } else {
+            this.windowController?.toggle();
+          }
         }
       });
       this.tray?.on('right-click', () => this.windowController?.hide());
@@ -1983,7 +2025,8 @@ class ApplicationMain {
       try {
         token = await this.daemonRpc.getWwwAuthToken();
       } catch (e) {
-        log.error(`Failed to get the WWW auth token: ${e.message}`);
+        const error = e as Error;
+        log.error(`Failed to get the WWW auth token: ${error.message}`);
       }
       return shell.openExternal(`${url}?token=${token}`);
     } else {
@@ -1993,6 +2036,31 @@ class ApplicationMain {
 
   private getProblemReportPath(id: string): string {
     return path.join(app.getPath('temp'), `${id}.log`);
+  }
+
+  private async updateMacOsScrollbarVisibility(): Promise<void> {
+    const command =
+      'defaults read kCFPreferencesAnyApplication AppleShowScrollBars || echo Automatic';
+    const { stdout } = await execAsync(command);
+    switch (stdout.trim()) {
+      case 'WhenScrolling':
+        this.macOsScrollbarVisibility = MacOsScrollbarVisibility.whenScrolling;
+        break;
+      case 'Always':
+        this.macOsScrollbarVisibility = MacOsScrollbarVisibility.always;
+        break;
+      case 'Automatic':
+      default:
+        this.macOsScrollbarVisibility = MacOsScrollbarVisibility.automatic;
+        break;
+    }
+
+    if (this.windowController?.webContents) {
+      IpcMainEventChannel.window.notifyMacOsScrollbarVisibility(
+        this.windowController.webContents,
+        this.macOsScrollbarVisibility,
+      );
+    }
   }
 }
 

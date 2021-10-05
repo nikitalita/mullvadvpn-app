@@ -125,7 +125,7 @@ export class DaemonRpc {
   private connectionObservers: ConnectionObserver[] = [];
   private nextSubscriptionId = 0;
   private subscriptions: Map<number, grpc.ClientReadableStream<grpcTypes.DaemonEvent>> = new Map();
-  private reconnectionTimeout?: number;
+  private reconnectionTimeout?: NodeJS.Timer;
 
   constructor(connectionParams: string) {
     this.client = (new ManagementServiceClient(
@@ -155,7 +155,11 @@ export class DaemonRpc {
 
   public disconnect() {
     this.isConnected = false;
-    this.subscriptions.clear();
+
+    for (const subscriptionId of this.subscriptions.keys()) {
+      this.removeSubscription(subscriptionId);
+    }
+
     this.client.close();
     if (this.reconnectionTimeout) {
       clearTimeout(this.reconnectionTimeout);
@@ -183,7 +187,8 @@ export class DaemonRpc {
       );
       const expiry = response.getExpiry()!.toDate().toISOString();
       return { expiry };
-    } catch (error) {
+    } catch (e) {
+      const error = e as grpc.ServiceError;
       if (error.code) {
         switch (error.code) {
           case grpc.status.UNAUTHENTICATED:
@@ -223,7 +228,8 @@ export class DaemonRpc {
         secondsAdded,
         newExpiry,
       };
-    } catch (error) {
+    } catch (e) {
+      const error = e as grpc.ServiceError;
       if (error.code) {
         switch (error.code) {
           case grpc.status.NOT_FOUND:
@@ -405,8 +411,9 @@ export class DaemonRpc {
       try {
         const daemonEvent = convertFromDaemonEvent(data);
         listener.onEvent(daemonEvent);
-      } catch (err) {
-        listener.onError(err);
+      } catch (e) {
+        const error = e as Error;
+        listener.onError(error);
       }
     });
 
@@ -555,13 +562,14 @@ export class DaemonRpc {
       this.subscriptions.delete(id);
       subscription.removeAllListeners('data');
       subscription.removeAllListeners('error');
-      try {
-        subscription.cancel();
-      } catch (error) {
+
+      subscription.on('error', (e) => {
+        const error = e as grpc.ServiceError;
         if (error.code !== grpc.status.CANCELLED) {
           throw error;
         }
-      }
+      });
+      subscription.cancel();
     }
   }
 
@@ -1157,12 +1165,24 @@ function convertFromOpenVpnConstraints(
 function convertFromWireguardConstraints(
   constraints: grpcTypes.WireguardConstraints,
 ): IWireguardConstraints {
-  const transportPort = convertFromConstraint(constraints.getPort());
-  if (transportPort !== 'any' && 'only' in transportPort) {
-    const port = convertFromConstraint(transportPort.only.getPort());
-    return { port };
+  const result: IWireguardConstraints = { port: 'any', ipVersion: 'any' };
+
+  const port = constraints.getPort()?.getPort();
+  if (port) {
+    result.port = { only: port };
   }
-  return { port: 'any' };
+
+  const ipVersion = constraints.getIpVersion()?.getProtocol();
+  switch (ipVersion) {
+    case grpcTypes.IpVersion.V4:
+      result.ipVersion = { only: 'ipv4' };
+      break;
+    case grpcTypes.IpVersion.V6:
+      result.ipVersion = { only: 'ipv6' };
+      break;
+  }
+
+  return result;
 }
 
 function convertFromTunnelTypeConstraint(
@@ -1265,6 +1285,7 @@ function convertToWireguardConstraints(
 ): grpcTypes.WireguardConstraints | undefined {
   if (constraint) {
     const wireguardConstraints = new grpcTypes.WireguardConstraints();
+
     const port = liftConstraint(constraint.port);
     if (port) {
       const portConstraints = new grpcTypes.TransportPort();
@@ -1272,6 +1293,16 @@ function convertToWireguardConstraints(
       portConstraints.setProtocol(grpcTypes.TransportProtocol.UDP);
       wireguardConstraints.setPort(portConstraints);
     }
+
+    const ipVersion = liftConstraint(constraint.ipVersion);
+    if (ipVersion) {
+      const ipVersionProtocol =
+        ipVersion === 'ipv4' ? grpcTypes.IpVersion.V4 : grpcTypes.IpVersion.V6;
+      const ipVersionConstraints = new grpcTypes.IpVersionConstraint();
+      ipVersionConstraints.setProtocol(ipVersionProtocol);
+      wireguardConstraints.setIpVersion(ipVersionConstraints);
+    }
+
     return wireguardConstraints;
   }
   return undefined;

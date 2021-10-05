@@ -22,9 +22,6 @@ pub mod wireguard;
 /// A module for low level platform specific tunnel device management.
 pub(crate) mod tun_provider;
 
-#[cfg(target_os = "windows")]
-mod windows;
-
 const OPENVPN_LOG_FILENAME: &str = "openvpn.log";
 const WIREGUARD_LOG_FILENAME: &str = "wireguard.log";
 
@@ -133,6 +130,7 @@ impl TunnelMonitor {
                 runtime,
                 &config,
                 log_file,
+                resource_dir,
                 on_event,
                 tun_provider,
                 route_manager,
@@ -164,6 +162,7 @@ impl TunnelMonitor {
         runtime: tokio::runtime::Handle,
         params: &wireguard_types::TunnelParameters,
         log: Option<PathBuf>,
+        resource_dir: &Path,
         on_event: L,
         tun_provider: &mut TunProvider,
         route_manager: &mut RouteManager,
@@ -180,6 +179,7 @@ impl TunnelMonitor {
             runtime,
             config,
             log.as_ref().map(|p| p.as_path()),
+            resource_dir,
             on_event,
             tun_provider,
             route_manager,

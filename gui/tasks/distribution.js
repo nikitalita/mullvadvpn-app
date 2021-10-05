@@ -41,7 +41,6 @@ const config = {
     'build/src/renderer/index.html',
     'build/src/renderer/bundle.js',
     'build/src/renderer/preloadBundle.js',
-    'build/src/renderer/components/CustomScrollbars.css',
     'node_modules/',
     '!**/*.tsbuildinfo',
   ],
@@ -115,6 +114,7 @@ const config = {
       { from: distAssets('binaries/x86_64-pc-windows-msvc/sslocal.exe'), to: '.' },
       { from: root('build/lib/x86_64-pc-windows-msvc/libwg.dll'), to: '.' },
       { from: distAssets('binaries/x86_64-pc-windows-msvc/wintun/wintun.dll'), to: '.' },
+      { from: distAssets('binaries/x86_64-pc-windows-msvc/wireguard-nt/wireguard.dll'), to: '.' },
     ],
   },
 

@@ -1,9 +1,9 @@
-import * as React from 'react';
 import { batch, Provider } from 'react-redux';
 import { Router } from 'react-router';
 import { bindActionCreators } from 'redux';
 
 import AppRouter from './components/AppRouter';
+import MacOsScrollbarDetection from './components/MacOsScrollbarDetection';
 import ErrorBoundary from './components/ErrorBoundary';
 import { AppContext } from './context';
 
@@ -47,34 +47,7 @@ import { LogLevel } from '../shared/logging-types';
 import IpcOutput from './lib/logging';
 import { RoutePath } from './lib/routes';
 
-// This function wraps all IPC calls to catch errors and then rethrow them without the
-// "Uncaught Error:" prefix that's added by Electron.
-// This is a temporary workaround which won't be required after this Electron PR has been merged and
-// released: https://github.com/electron/electron/pull/28346
-function handleReponse(ipc: typeof window.ipc): typeof window.ipc {
-  const wrappedIpc: Record<string, Record<string, unknown>> = {};
-
-  Object.entries(ipc).forEach(([groupName, group]) => {
-    wrappedIpc[groupName] = {} as typeof group;
-
-    Object.entries(group).forEach(([fnName, fn]) => {
-      wrappedIpc[groupName][fnName] = (...args: Parameters<typeof fn>) => {
-        const response = fn(...args);
-        if (response instanceof Promise) {
-          return response.catch((error: Error) => {
-            throw new Error(error.message?.replace(/^Uncaught Error: /, ''));
-          });
-        } else {
-          return response;
-        }
-      };
-    });
-  });
-
-  return wrappedIpc as typeof window.ipc;
-}
-
-const IpcRendererEventChannel = handleReponse(window.ipc);
+const IpcRendererEventChannel = window.ipc;
 
 interface IPreferredLocaleDescriptor {
   name: string;
@@ -132,7 +105,7 @@ export default class AppRenderer {
     log.addOutput(new ConsoleOutput(LogLevel.debug));
     log.addOutput(new IpcOutput(LogLevel.debug));
 
-    IpcRendererEventChannel.windowShape.listen((windowShapeParams) => {
+    IpcRendererEventChannel.window.listenShape((windowShapeParams) => {
       if (typeof windowShapeParams.arrowPosition === 'number') {
         this.reduxActions.userInterface.updateWindowArrowPosition(windowShapeParams.arrowPosition);
       }
@@ -199,8 +172,12 @@ export default class AppRenderer {
       this.reduxActions.settings.setSplitTunnelingApplications(applications);
     });
 
-    IpcRendererEventChannel.windowFocus.listen((focus: boolean) => {
+    IpcRendererEventChannel.window.listenFocus((focus: boolean) => {
       this.reduxActions.userInterface.setWindowFocused(focus);
+    });
+
+    IpcRendererEventChannel.window.listenMacOsScrollbarVisibility((visibility) => {
+      this.reduxActions.userInterface.setMacOsScrollbarVisibility(visibility);
     });
 
     IpcRendererEventChannel.navigation.listenReset(() => this.history.dismiss(true));
@@ -237,6 +214,12 @@ export default class AppRenderer {
     this.storeAutoStart(initialState.autoStart);
     this.setWireguardPublicKey(initialState.wireguardPublicKey);
 
+    if (initialState.macOsScrollbarVisibility !== undefined) {
+      this.reduxActions.userInterface.setMacOsScrollbarVisibility(
+        initialState.macOsScrollbarVisibility,
+      );
+    }
+
     if (initialState.isConnected) {
       void this.onDaemonConnected();
     }
@@ -265,6 +248,7 @@ export default class AppRenderer {
           <Router history={this.history.asHistory}>
             <ErrorBoundary>
               <AppRouter />
+              {window.env.platform === 'darwin' && <MacOsScrollbarDetection />}
             </ErrorBoundary>
           </Router>
         </Provider>
@@ -285,7 +269,8 @@ export default class AppRenderer {
       actions.account.updateAccountToken(accountToken);
       actions.account.loggedIn();
       this.redirectToConnect();
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       actions.account.loginFailed(error);
     }
   }
@@ -294,7 +279,8 @@ export default class AppRenderer {
     try {
       await IpcRendererEventChannel.account.logout();
     } catch (e) {
-      log.info('Failed to logout: ', e.message);
+      const error = e as Error;
+      log.info('Failed to logout: ', error.message);
     }
   }
 
@@ -310,7 +296,8 @@ export default class AppRenderer {
       const accountExpiry = new Date().toISOString();
       actions.account.accountCreated(accountToken, accountExpiry);
       this.redirectToConnect();
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       actions.account.createAccountFailed(error);
     }
   }
@@ -392,7 +379,8 @@ export default class AppRenderer {
     try {
       token = await IpcRendererEventChannel.account.getWwwAuthToken();
     } catch (e) {
-      log.error(`Failed to get the WWW auth token: ${e.message}`);
+      const error = e as Error;
+      log.error(`Failed to get the WWW auth token: ${error.message}`);
     }
     void this.openUrl(`${link}?token=${token}`);
   };
@@ -471,7 +459,8 @@ export default class AppRenderer {
     try {
       const valid = await IpcRendererEventChannel.wireguardKeys.verifyKey();
       actions.settings.completeWireguardKeyVerification(valid);
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to verify WireGuard key - ${error.message}`);
       actions.settings.completeWireguardKeyVerification(undefined);
     }
@@ -632,7 +621,10 @@ export default class AppRenderer {
             port: liftConstraint(openvpnConstraints.port),
             protocol: liftConstraint(openvpnConstraints.protocol),
           },
-          wireguard: { port: liftConstraint(wireguardConstraints.port) },
+          wireguard: {
+            port: liftConstraint(wireguardConstraints.port),
+            ipVersion: liftConstraint(wireguardConstraints.ipVersion),
+          },
           tunnelProtocol: liftConstraint(tunnelProtocol),
         },
       });
@@ -966,7 +958,8 @@ export default class AppRenderer {
       if (location && getLocationPromise === this.getLocationPromise) {
         return location;
       }
-    } catch (error) {
+    } catch (e) {
+      const error = e as Error;
       log.error(`Failed to update the location: ${error.message}`);
     }
   }

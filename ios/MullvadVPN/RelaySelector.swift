@@ -9,14 +9,14 @@
 import Foundation
 import Network
 
-struct RelaySelectorResult {
+struct RelaySelectorResult: Codable {
     var endpoint: MullvadEndpoint
-    var relay: ServerRelay
+    var relay: REST.ServerRelay
     var location: Location
 }
 
 private struct RelayWithLocation {
-    var relay: ServerRelay
+    var relay: REST.ServerRelay
     var location: Location
 }
 
@@ -31,16 +31,12 @@ extension RelaySelectorResult {
     }
 }
 
-struct RelaySelector {
+enum RelaySelector {}
 
-    private let relays: ServerRelaysResponse
+extension RelaySelector {
 
-    init(relays: ServerRelaysResponse) {
-        self.relays = relays
-    }
-
-    func evaluate(with constraints: RelayConstraints) -> RelaySelectorResult? {
-        let filteredRelays = Self.applyConstraints(constraints, relays: Self.parseRelaysResponse(self.relays))
+    static func evaluate(relays: REST.ServerRelaysResponse, constraints: RelayConstraints) -> RelaySelectorResult? {
+        let filteredRelays = Self.applyConstraints(constraints, relays: Self.parseRelaysResponse(relays))
         let totalWeight = filteredRelays.reduce(0) { $0 + $1.relay.weight }
 
         guard totalWeight > 0 else { return nil }
@@ -97,7 +93,7 @@ struct RelaySelector {
         }
     }
 
-    private static func parseRelaysResponse(_ response: ServerRelaysResponse) -> [RelayWithLocation] {
+    private static func parseRelaysResponse(_ response: REST.ServerRelaysResponse) -> [RelayWithLocation] {
         return response.wireguard.relays.compactMap { (serverRelay) -> RelayWithLocation? in
             guard let serverLocation = response.locations[serverRelay.location] else { return nil }
 

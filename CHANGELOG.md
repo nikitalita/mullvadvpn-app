@@ -29,12 +29,14 @@ Line wrap the file at 100 chars.                                              Th
 - Add WireGuard over TCP CLI option for all relays.
 - Add GUI environment variable `MULLVAD_DISABLE_UPDATE_NOTIFICATION`. If set to `1`, GUI
   notification will be disabled when an update is available.
+- Add setting for changing between IPv4 and IPv6 for the connection to WireGuard servers on desktop.
 
 #### Android
 - Added toggle for Split tunneling view to be able to show system apps
 
 #### Windows
 - Resolve symbolic links and junctions for excluded apps.
+- Add opt-in support for NT kernel WireGuard driver. It can be enabled in the CLI.
 
 ### Changed
 - Only use the account history file to store the last used account.
@@ -45,12 +47,14 @@ Line wrap the file at 100 chars.                                              Th
 - Update Electron from 11.2.3 to 11.4.9.
 - Move OpenVPN and WireGuard settings in the advanced settings view into separate settings views.
 - Return to main view in desktop app after being hidden/closed for two minutes.
+- Update Electron from 11.4.9 to 15.0.0.
 
 #### Linux
 - Always send DNS requests inside the tunnel for excluded processes when using public custom DNS.
 
 #### Windows
 - Upgrade Wintun from 0.10.4 to 0.13.
+- Reduce tunnel setup time for OpenVPN by disabling DAD.
 
 ### Fixed
 - Fix link to download page not always using the beta URL when it should.
@@ -68,12 +72,16 @@ Line wrap the file at 100 chars.                                              Th
 - Fix incorrect location and connection status while disconnecting and incorrect location in the
   beginning while connecting in the desktop app.
 - Improve responsiveness of the controls and status text in the main view in the desktop app.
+- Read macOS scrollbar visibility settings to decide wheter or not the scrollbars should hide when
+  not scrolling.
+- Fix desktop app showing a future date for when WireGuard key was generated.
 
 #### Linux
 - Make offline monitor aware of routing table changes.
 - Assign local DNS servers to more appropriate interfaces when using systemd-resolved.
 - Disable DNS over TLS for tunnel's DNS config when using systemd-resolved.
 - Fix DNS when combining a static resolv.conf with ad blocking DNS.
+- Check connectivity correctly on IPv6-only networks.
 
 #### Windows
 - Fix failure to restart the daemon when resuming from "fast startup" hibernation.
@@ -88,11 +96,15 @@ Line wrap the file at 100 chars.                                              Th
 - Fix daemon not starting when a path is excluded on a drive that has since been removed.
 - Prefer WireGuard if the constraints preclude OpenVPN and the tunnel protocol is "auto", instead
   of failing due to "no matching relays".
+- Retry tunnel device creation multiple times to work around issues early after boot or hibernation.
 
 #### Android
 - Fix erasing wireguard MTU value in some scenarious.
 - Fix initial state of Split tunneling excluded apps list. Previously it was not notified the daemon
 properly after initialization.
+
+#### macOS
+- Prevent app from showing when dragging tray icon on macOS.
 
 ## [2021.4] - 2021-06-30
 This release is for desktop only.

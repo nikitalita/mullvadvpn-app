@@ -10,6 +10,7 @@ import UIKit
 import StoreKit
 import UserNotifications
 import Logging
+import BackgroundTasks
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -22,17 +23,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private let simulatorTunnelProvider = SimulatorTunnelProviderHost()
     #endif
 
-    #if DEBUG
-    private let packetTunnelLogForwarder = LogStreamer<UTF8>(fileURLs: [ApplicationConfiguration.packetTunnelLogFileURL!])
-    #endif
-
     private var rootContainer: RootContainerViewController?
     private var splitViewController: CustomSplitViewController?
     private var selectLocationViewController: SelectLocationViewController?
     private var connectController: ConnectViewController?
     private weak var settingsNavController: SettingsNavigationController?
 
-    private var cachedRelays: CachedRelays? {
+    private var cachedRelays: RelayCache.CachedRelays? {
         didSet {
             if let cachedRelays = cachedRelays {
                 self.selectLocationViewController?.setCachedRelays(cachedRelays)
@@ -40,7 +37,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
     }
     private var relayConstraints: RelayConstraints?
-    private let alertPresenter = AlertPresenter()
 
     private let notificationManager = NotificationManager()
 
@@ -52,17 +48,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         self.logger = Logger(label: "AppDelegate")
 
-        #if DEBUG
-        let stdoutStream = TextFileOutputStream.standardOutputStream()
-        packetTunnelLogForwarder.start { (str) in
-            stdoutStream.write("\(str)\n")
-        }
-        #endif
-
         #if targetEnvironment(simulator)
         // Configure mock tunnel provider on simulator
         SimulatorTunnelProvider.shared.delegate = simulatorTunnelProvider
         #endif
+
+        if #available(iOS 13.0, *) {
+            // Register background tasks on iOS 13
+            RelayCache.Tracker.shared.registerAppRefreshTask()
+            TunnelManager.shared.registerBackgroundTask()
+        } else {
+            // Set background refresh interval on iOS 12
+            application.setMinimumBackgroundFetchInterval(ApplicationConfiguration.minimumBackgroundFetchInterval)
+        }
 
         // Assign user notification center delegate
         UNUserNotificationCenter.current().delegate = self
@@ -75,56 +73,52 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         launchController.view.backgroundColor = .primaryColor
         self.window?.rootViewController = launchController
 
-        // Update relays
-        RelayCache.shared.addObserver(self)
-        RelayCache.shared.updateRelays()
+        // Add relay cache observer
+        RelayCache.Tracker.shared.addObserver(self)
 
         // Load initial relays
-        self.logger?.debug("Load relays")
-        RelayCache.shared.read { (result) in
-            DispatchQueue.main.async {
+        RelayCache.Tracker.shared.read()
+            .receive(on: .main)
+            .observe { completion in
+                guard let result = completion.unwrappedValue else { return }
+
                 switch result {
                 case .success(let cachedRelays):
                     self.cachedRelays = cachedRelays
-                    self.logger?.debug("Loaded relays")
 
                 case .failure(let error):
                     self.logger?.error(chainedError: error, message: "Failed to load initial relays")
                 }
-            }
         }
 
         // Load tunnels
-        self.logger?.debug("Load tunnels")
-        TunnelManager.shared.loadTunnel(accountToken: Account.shared.token) { (result) in
-            DispatchQueue.main.async {
-                switch result {
-                case .success:
-                    self.logger?.debug("Loaded tunnels")
-                    self.relayConstraints = TunnelManager.shared.tunnelSettings?.relayConstraints
-                    self.didFinishInitialization()
+        TunnelManager.shared.loadTunnel(accountToken: Account.shared.token)
+            .receive(on: .main)
+            .onSuccess { _ in
+                self.relayConstraints = TunnelManager.shared.tunnelInfo?.tunnelSettings.relayConstraints
+                self.didFinishInitialization()
+            }
+            .onFailure { error in
+                self.logger?.error(chainedError: error, message: "Failed to load tunnels")
 
-                case .failure(let error):
-                    self.logger?.error(chainedError: error, message: "Failed to load tunnels")
+                switch error {
+                case .loadAllVPNConfigurations(_), .removeInconsistentVPNConfiguration(_):
+                    // TODO: avoid throwing fatal error and show the problem report UI instead.
+                    fatalError(error.displayChain(message: "Failed to load tunnels"))
 
-                    switch error {
-                    case .loadAllVPNConfigurations(_), .removeInconsistentVPNConfiguration(_):
-                        // TODO: avoid throwing fatal error and show the problem report UI instead.
-                        fatalError(error.displayChain(message: "Failed to load tunnels"))
-
-                    case .migrateTunnelSettings(_), .readTunnelSettings(_):
-                        // Forget that user was logged in since tunnel settings are likely corrupt
-                        // or missing.
-                        Account.shared.forget {
+                case .migrateTunnelSettings(_), .readTunnelSettings(_):
+                    // Forget that user was logged in since tunnel settings are likely corrupt
+                    // or missing.
+                    Account.shared.forget()
+                        .observe { _ in
                             self.didFinishInitialization()
                         }
 
-                    default:
-                        fatalError("Unexpected error coming from loadTunnel()")
-                    }
+                default:
+                    fatalError("Unexpected error coming from loadTunnel()")
                 }
             }
-        }
+            .observe { _ in }
 
         // Show the window
         self.window?.makeKeyAndVisible()
@@ -133,10 +127,87 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        TunnelManager.shared.refreshTunnelState(completionHandler: nil)
+        // Start periodic relays updates
+        RelayCache.Tracker.shared.startPeriodicUpdates()
+
+        // Start periodic private key rotation
+        TunnelManager.shared.startPeriodicPrivateKeyRotation()
+    }
+
+    func applicationWillResignActive(_ application: UIApplication) {
+        // Stop periodic relays updates
+        RelayCache.Tracker.shared.stopPeriodicUpdates()
+
+        // Stop periodic private key rotation
+        TunnelManager.shared.stopPeriodicPrivateKeyRotation()
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        if #available(iOS 13, *) {
+            scheduleBackgroundTasks()
+        }
+    }
+
+    func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        logger?.info("Start background refresh")
+
+        RelayCache.Tracker.shared.updateRelays()
+            .then { fetchRelaysResult -> Promise<UIBackgroundFetchResult> in
+                switch fetchRelaysResult {
+                case .success(let result):
+                    self.logger?.debug("Finished updating relays: \(result)")
+                case .failure(let error):
+                    self.logger?.error(chainedError: error, message: "Failed to update relays")
+                }
+
+                return TunnelManager.shared.rotatePrivateKey()
+                    .then { rotationResult -> UIBackgroundFetchResult in
+                        switch rotationResult {
+                        case .success(let result):
+                            self.logger?.debug("Finished rotating the key: \(result)")
+                        case .failure(let error):
+                            self.logger?.error(chainedError: error, message: "Failed to rotate the key")
+                        }
+
+                        return fetchRelaysResult.backgroundFetchResult.combine(with: rotationResult.backgroundFetchResult)
+                    }
+            }
+            .receive(on: .main)
+            .observe { completion in
+                switch completion {
+                case .finished(let backgroundFetchResult):
+                    self.logger?.info("Finish background refresh with \(backgroundFetchResult)")
+                    completionHandler(backgroundFetchResult)
+
+                case .cancelled:
+                    self.logger?.info("Finish background refresh with cancelled promise")
+                    completionHandler(.failed)
+                }
+            }
     }
 
     // MARK: - Private
+
+    @available(iOS 13.0, *)
+    private func scheduleBackgroundTasks() {
+        if case .finished(let result) = RelayCache.Tracker.shared.scheduleAppRefreshTask().await() {
+            switch result {
+            case .success:
+                self.logger?.debug("Scheduled app refresh task")
+            case .failure(let error):
+                self.logger?.error(chainedError: error, message: "Could not schedule app refresh task")
+            }
+        }
+
+        if case .finished(let result) = TunnelManager.shared.scheduleBackgroundTask().await() {
+            switch result {
+            case .success:
+                self.logger?.debug("Scheduled private key rotation task")
+            case .failure(let error):
+                self.logger?.error(chainedError: error, message: "Could not schedule private key rotation task")
+            }
+        }
+    }
 
     private func didFinishInitialization() {
         self.logger?.debug("Finished initialization. Show user interface.")
@@ -156,9 +227,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             fatalError()
         }
 
-        notificationManager.delegate = connectController?.notificationController
         notificationManager.notificationProviders = [
-            AccountExpiryNotificationProvider()
+            AccountExpiryNotificationProvider(),
+            TunnelErrorNotificationProvider()
         ]
         notificationManager.updateNotifications()
 
@@ -248,6 +319,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private func makeConnectViewController() -> ConnectViewController {
         let connectController = ConnectViewController()
         connectController.delegate = self
+        notificationManager.delegate = connectController.notificationController
 
         return connectController
     }
@@ -388,9 +460,11 @@ extension AppDelegate: RootContainerViewControllerDelegate {
 
         switch TunnelManager.shared.tunnelState {
         case .connected, .connecting, .reconnecting:
-            reconnectTunnel()
+            TunnelManager.shared.reconnectTunnel()
         case .disconnecting, .disconnected:
-            connectTunnel()
+            TunnelManager.shared.startTunnel()
+        case .pendingReconnect:
+            break
         }
         return true
     }
@@ -400,40 +474,42 @@ extension AppDelegate: RootContainerViewControllerDelegate {
 
 extension AppDelegate: LoginViewControllerDelegate {
 
-    func loginViewController(_ controller: LoginViewController, loginWithAccountToken accountToken: String, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void) {
+    func loginViewController(_ controller: LoginViewController, loginWithAccountToken accountToken: String, completion: @escaping (Result<REST.AccountResponse, Account.Error>) -> Void) {
         self.rootContainer?.setEnableSettingsButton(false)
 
-        Account.shared.login(with: accountToken) { (result) in
-            switch result {
-            case .success:
+        Account.shared.login(with: accountToken)
+            .onSuccess { _ in
                 self.logger?.debug("Logged in with existing token")
                 // RootContainer's settings button will be re-enabled in `loginViewControllerDidLogin`
-
-            case .failure(let error):
+            }
+            .onFailure { error in
                 self.logger?.error(chainedError: error, message: "Failed to log in with existing account")
                 self.rootContainer?.setEnableSettingsButton(true)
             }
+            .observe { promiseCompletion in
+                guard let result = promiseCompletion.unwrappedValue else { return }
 
-            completion(result)
-        }
+                completion(result)
+            }
     }
 
-    func loginViewControllerLoginWithNewAccount(_ controller: LoginViewController, completion: @escaping (Result<AccountResponse, Account.Error>) -> Void) {
+    func loginViewControllerLoginWithNewAccount(_ controller: LoginViewController, completion: @escaping (Result<REST.AccountResponse, Account.Error>) -> Void) {
         self.rootContainer?.setEnableSettingsButton(false)
 
-        Account.shared.loginWithNewAccount { (result) in
-            switch result {
-            case .success:
+        Account.shared.loginWithNewAccount()
+            .onSuccess { _ in
                 self.logger?.debug("Logged in with new account token")
                 // RootContainer's settings button will be re-enabled in `loginViewControllerDidLogin`
-
-            case .failure(let error):
+            }
+            .onFailure { error in
                 self.logger?.error(chainedError: error, message: "Failed to log in with new account")
                 self.rootContainer?.setEnableSettingsButton(true)
             }
+            .observe { promiseCompletion in
+                guard let result = promiseCompletion.unwrappedValue else { return }
 
-            completion(result)
-        }
+                completion(result)
+            }
     }
 
     func loginViewControllerDidLogin(_ controller: LoginViewController) {
@@ -442,7 +518,7 @@ extension AppDelegate: LoginViewControllerDelegate {
         // Move the settings button back into header bar
         self.rootContainer?.removeSettingsButtonFromPresentationContainer()
 
-        self.relayConstraints = TunnelManager.shared.tunnelSettings?.relayConstraints
+        self.relayConstraints = TunnelManager.shared.tunnelInfo?.tunnelSettings.relayConstraints
         self.selectLocationViewController?.setSelectedRelayLocation(relayConstraints?.location.value, animated: false, scrollPosition: .middle)
 
         switch UIDevice.current.userInterfaceIdiom {
@@ -519,84 +595,8 @@ extension AppDelegate: ConnectViewControllerDelegate {
         self.selectLocationViewController = contentController
     }
 
-    func connectViewControllerShouldConnectTunnel(_ controller: ConnectViewController) {
-        connectTunnel()
-    }
-
-    func connectViewControllerShouldDisconnectTunnel(_ controller: ConnectViewController) {
-        disconnectTunnel()
-    }
-
-    func connectViewControllerShouldReconnectTunnel(_ controller: ConnectViewController) {
-        reconnectTunnel()
-    }
-
     @objc private func handleDismissSelectLocationController(_ sender: Any) {
         self.selectLocationViewController?.dismiss(animated: true)
-    }
-
-    private func connectTunnel() {
-        TunnelManager.shared.startTunnel { (result) in
-            DispatchQueue.main.async {
-                switch result {
-                case .success:
-                    self.logger?.debug("Connected VPN tunnel")
-
-                case .failure(let error):
-                    self.logger?.error(chainedError: error, message: "Failed to start the VPN tunnel")
-                    self.presentTunnelError(error, alertTitle: NSLocalizedString(
-                        "START_VPN_TUNNEL_ERROR_ALERT_TITLE",
-                        tableName: "AppDelegate",
-                        value: "Failed to start the VPN tunnel",
-                        comment: ""
-                    ))
-                }
-            }
-        }
-    }
-
-    private func disconnectTunnel() {
-        TunnelManager.shared.stopTunnel { (result) in
-            switch result {
-            case .success:
-                self.logger?.debug("Disconnected VPN tunnel")
-
-            case .failure(let error):
-                self.logger?.error(chainedError: error, message: "Failed to stop the VPN tunnel")
-                self.presentTunnelError(error, alertTitle: NSLocalizedString(
-                    "STOP_VPN_TUNNEL_ERROR_ALERT_TITLE",
-                    tableName: "AppDelegate",
-                    value: "Failed to stop the VPN tunnel",
-                    comment: ""
-                ))
-            }
-        }
-    }
-
-    private func reconnectTunnel() {
-        TunnelManager.shared.reconnectTunnel {
-            self.logger?.debug("Re-connected VPN tunnel")
-        }
-    }
-
-    private func presentTunnelError(_ error: TunnelManager.Error, alertTitle: String) {
-        let alertController = UIAlertController(
-            title: alertTitle,
-            message: error.errorChainDescription,
-            preferredStyle: .alert
-        )
-        alertController.addAction(
-            UIAlertAction(
-                title: NSLocalizedString(
-                    "TUNNEL_ERROR_ALERT_OK_BUTTON",
-                    tableName: "AppDelegate",
-                    comment: "Dismiss button in tunnel error alert."
-                ),
-                style: .cancel
-            )
-        )
-
-        self.alertPresenter.enqueue(alertController, presentingController: self.rootContainer!)
     }
 }
 
@@ -621,22 +621,22 @@ extension AppDelegate: SelectLocationViewControllerDelegate {
     private func selectLocationControllerDidSelectRelayLocation(_ relayLocation: RelayLocation) {
         let relayConstraints = RelayConstraints(location: .only(relayLocation))
 
-        TunnelManager.shared.setRelayConstraints(relayConstraints) { [weak self] (result) in
-            guard let self = self else { return }
+        TunnelManager.shared.setRelayConstraints(relayConstraints)
+            .receive(on: .main)
+            .observe { completion in
+                guard let result = completion.unwrappedValue else { return }
 
-            DispatchQueue.main.async {
                 self.relayConstraints = relayConstraints
 
                 switch result {
                 case .success:
                     self.logger?.debug("Updated relay constraints: \(relayConstraints)")
-                    self.connectTunnel()
+                    TunnelManager.shared.startTunnel()
 
                 case .failure(let error):
                     self.logger?.error(chainedError: error, message: "Failed to update relay constraints")
                 }
             }
-        }
     }
 }
 
@@ -701,7 +701,7 @@ extension AppDelegate: UIAdaptivePresentationControllerDelegate {
 
 extension AppDelegate: RelayCacheObserver {
 
-    func relayCache(_ relayCache: RelayCache, didUpdateCachedRelays cachedRelays: CachedRelays) {
+    func relayCache(_ relayCache: RelayCache.Tracker, didUpdateCachedRelays cachedRelays: RelayCache.CachedRelays) {
         DispatchQueue.main.async {
             self.cachedRelays = cachedRelays
         }

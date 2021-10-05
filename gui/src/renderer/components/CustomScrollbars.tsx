@@ -1,19 +1,64 @@
 import * as React from 'react';
 import styled from 'styled-components';
+import { MacOsScrollbarVisibility } from '../../shared/ipc-schema';
 import { Scheduler } from '../../shared/scheduler';
+import { useSelector } from '../redux/store';
 
-const ScrollableContent = styled.div({
+const StyledScrollableContent = styled.div({
   display: 'flex',
   flexDirection: 'column',
   minHeight: '100%',
   height: 'max-content',
 });
 
+const StyledCustomScrollbars = styled.div({
+  display: 'flex',
+  flexDirection: 'column',
+  position: 'relative',
+  overflow: 'hidden',
+});
+
+const StyledScrollable = styled.div((props: { fillContainer?: boolean }) => ({
+  flex: props.fillContainer ? '1' : undefined,
+  width: '100%',
+  overflow: 'auto',
+  '::-webkit-scrollbar': {
+    display: 'none',
+  },
+}));
+
+const StyledTrack = styled.div({}, (props: { show: boolean }) => ({
+  position: 'absolute',
+  top: 0,
+  right: 0,
+  bottom: 0,
+  width: '16px',
+  backgroundColor: 'rgba(0, 0, 0, 0.1)',
+  opacity: props.show ? 1 : 0,
+  transition: 'width 0.1s ease-in-out, opacity 0.25s ease-in-out',
+  zIndex: 98,
+  pointerEvents: props.show ? 'all' : 'none',
+}));
+
+const StyledThumb = styled.div({}, (props: { show: boolean; active: boolean; wide: boolean }) => ({
+  position: 'absolute',
+  top: 0,
+  right: 0,
+  backgroundColor: props.active ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.2)',
+  borderRadius: props.wide ? '6px' : '4px',
+  width: props.wide ? '12px' : '8px',
+  transition:
+    'width 0.25s ease-in-out, border-radius 0.25s ease-in-out, height 0.25s ease-in-out, opacity 0.25s ease-in-out, background-color 0.1s ease-in-out',
+  opacity: props.show ? 1 : 0,
+  zIndex: 99,
+  pointerEvents: 'none',
+}));
+
 const AUTOHIDE_TIMEOUT = 1000;
 
 interface IProps {
-  autoHide: boolean;
-  trackPadding: { x: number; y: number };
+  autoHide?: boolean;
+  trackPadding?: { x: number; y: number };
   onScroll?: (value: IScrollEvent) => void;
   className?: string;
   fillContainer?: boolean;
@@ -44,10 +89,26 @@ interface IScrollbarUpdateContext {
   position: boolean;
 }
 
-export default class CustomScrollbars extends React.Component<IProps, IState> {
-  public static defaultProps: IProps = {
-    // auto-hide on macOS by default
-    autoHide: window.env.platform === 'darwin',
+export default React.forwardRef(function CustomScrollbarsContainer(
+  props: IProps,
+  forwardRef: React.Ref<CustomScrollbars>,
+) {
+  const macOsScrollbarVisibility = useSelector(
+    (state) => state.userInterface.macOsScrollbarVisibility,
+  );
+  const autoHide =
+    props.autoHide ??
+    (window.env.platform === 'darwin' &&
+      (macOsScrollbarVisibility === undefined ||
+        macOsScrollbarVisibility === MacOsScrollbarVisibility.whenScrolling));
+
+  return <CustomScrollbars {...props} autoHide={autoHide} ref={forwardRef} />;
+});
+
+export type CustomScrollbarsRef = CustomScrollbars;
+
+class CustomScrollbars extends React.Component<IProps, IState> {
+  public static defaultProps: Partial<IProps> = {
     trackPadding: { x: 2, y: 2 },
   };
 
@@ -161,8 +222,8 @@ export default class CustomScrollbars extends React.Component<IProps, IState> {
     return (
       prevProps.children !== nextProps.children ||
       prevProps.autoHide !== nextProps.autoHide ||
-      prevProps.trackPadding.x !== nextProps.trackPadding.x ||
-      prevProps.trackPadding.y !== nextProps.trackPadding.y ||
+      prevProps.trackPadding?.x !== nextProps.trackPadding?.x ||
+      prevProps.trackPadding?.y !== nextProps.trackPadding?.y ||
       prevState.canScroll !== nextState.canScroll ||
       prevState.showScrollIndicators !== nextState.showScrollIndicators ||
       prevState.showTrack !== nextState.showTrack ||
@@ -198,34 +259,28 @@ export default class CustomScrollbars extends React.Component<IProps, IState> {
       onScroll: _onScroll,
       fillContainer,
       children,
-      className,
       ...otherProps
     } = this.props;
     const showScrollbars = this.state.canScroll && this.state.showScrollIndicators;
-    const thumbAnimationClass = showScrollbars ? ' custom-scrollbars__thumb--visible' : '';
-    const thumbActiveClass =
-      this.state.isTrackHovered || this.state.isDragging ? ' custom-scrollbars__thumb--active' : '';
-    const thumbWideClass = this.state.isWide ? ' custom-scrollbars__thumb--wide' : '';
-    const trackClass =
-      showScrollbars && this.state.showTrack ? ' custom-scrollbars__track--visible' : '';
-    const classNames = className ? `${className} custom-scrollbars` : 'custom-scrollbars';
 
     return (
-      <div {...otherProps} className={classNames}>
-        <div className={`custom-scrollbars__track ${trackClass}`} ref={this.trackRef} />
-        <div
-          className={`custom-scrollbars__thumb ${thumbWideClass} ${thumbActiveClass} ${thumbAnimationClass}`}
-          style={{ position: 'absolute', top: 0, right: 0 }}
+      <StyledCustomScrollbars {...otherProps}>
+        <StyledTrack ref={this.trackRef} show={showScrollbars && this.state.showTrack} />
+        <StyledThumb
           ref={this.thumbRef}
+          show={showScrollbars}
+          active={this.state.isTrackHovered || this.state.isDragging}
+          wide={this.state.isWide}
         />
-        <div
-          className="custom-scrollbars__scrollable"
-          style={{ overflow: 'auto', flex: fillContainer ? '1' : undefined }}
+        <StyledScrollable
+          fillContainer={fillContainer}
           onScroll={this.onScroll}
           ref={this.scrollableRef}>
-          <ScrollableContent ref={this.scrollableContentRef}>{children}</ScrollableContent>
-        </div>
-      </div>
+          <StyledScrollableContent ref={this.scrollableContentRef}>
+            {children}
+          </StyledScrollableContent>
+        </StyledScrollable>
+      </StyledCustomScrollbars>
     );
   }
 
@@ -350,7 +405,7 @@ export default class CustomScrollbars extends React.Component<IProps, IState> {
       // a thumb at the lowest point matches the bottom of scrollable view
       const thumbBoundary = this.computeTrackLength(scrollable) - thumb.clientHeight;
       const thumbTop =
-        pointInScrollContainer.y - this.state.dragStart.y - this.props.trackPadding.y;
+        pointInScrollContainer.y - this.state.dragStart.y - (this.props.trackPadding?.y ?? 0);
       const newScrollTop = (thumbTop / thumbBoundary) * maxScrollTop;
 
       scrollable.scrollTop = newScrollTop;
@@ -410,7 +465,7 @@ export default class CustomScrollbars extends React.Component<IProps, IState> {
   }
 
   private computeTrackLength(scrollable: HTMLElement) {
-    return scrollable.offsetHeight - this.props.trackPadding.y * 2;
+    return scrollable.offsetHeight - (this.props.trackPadding?.y ?? 0) * 2;
   }
 
   // Computes the position of child element within scrollable container
@@ -471,10 +526,10 @@ export default class CustomScrollbars extends React.Component<IProps, IState> {
 
     // calculate thumb position based on scroll progress and thumb boundary
     // adding vertical inset to adjust the thumb's appearance
-    const thumbPosition = thumbBoundary * scrollPosition + this.props.trackPadding.y;
+    const thumbPosition = thumbBoundary * scrollPosition + (this.props.trackPadding?.y ?? 0);
 
     return {
-      x: -this.props.trackPadding.x,
+      x: -(this.props.trackPadding?.x ?? 0),
       y: thumbPosition,
     };
   }

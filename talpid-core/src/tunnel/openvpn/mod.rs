@@ -15,11 +15,7 @@ use lazy_static::lazy_static;
 #[cfg(target_os = "linux")]
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
-use std::{
-    ffi::{OsStr, OsString},
-    os::windows::ffi::OsStrExt,
-    time::Instant,
-};
+use std::ffi::OsString;
 use std::{
     fs,
     io::{self, Write},
@@ -39,43 +35,16 @@ use which;
 #[cfg(windows)]
 use widestring::U16CString;
 #[cfg(windows)]
-use winapi::shared::{
-    guiddef::GUID,
-    ifdef::NET_LUID,
-    netioapi::{
-        ConvertInterfaceAliasToLuid, FreeMibTable, GetUnicastIpAddressEntry,
-        GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
-    },
-    nldef::{IpDadStatePreferred, IpDadStateTentative, NL_DAD_STATE},
-    winerror::NO_ERROR,
-    ws2def::AF_UNSPEC,
-};
-#[cfg(windows)]
-use winreg::enums::{KEY_READ, KEY_WRITE};
+use winapi::shared::{guiddef::GUID, ifdef::NET_LUID};
 
 #[cfg(windows)]
-mod windows;
+mod wintun;
 
 
 #[cfg(windows)]
 lazy_static! {
-    static ref WINTUN_DLL: Mutex<Option<Arc<windows::WintunDll>>> = Mutex::new(None);
     static ref ADAPTER_ALIAS: U16CString = U16CString::from_str("Mullvad").unwrap();
     static ref ADAPTER_POOL: U16CString = U16CString::from_str("Mullvad").unwrap();
-}
-
-#[cfg(windows)]
-fn get_wintun_dll(resource_dir: &Path) -> Result<Arc<windows::WintunDll>> {
-    let mut dll = (*WINTUN_DLL).lock().expect("Wintun mutex poisoned");
-    match &*dll {
-        Some(dll) => Ok(dll.clone()),
-        None => {
-            let new_dll =
-                Arc::new(windows::WintunDll::new(resource_dir).map_err(Error::WintunDllError)?);
-            *dll = Some(new_dll.clone());
-            Ok(new_dll)
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -85,11 +54,6 @@ const ADAPTER_GUID: GUID = GUID {
     Data3: 0x4EBB,
     Data4: [0x85, 0x36, 0x57, 0x6A, 0xB8, 0x6A, 0xFE, 0x9A],
 };
-
-#[cfg(windows)]
-const DEVICE_READY_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(windows)]
-const DEVICE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 
 /// Results from fallible operations on the OpenVPN tunnel.
@@ -128,47 +92,12 @@ pub enum Error {
     /// cannot create a wintun interface
     #[cfg(windows)]
     #[error(display = "Failed to create Wintun adapter")]
-    WintunError(#[error(source)] io::Error),
+    WintunCreateAdapterError(#[error(source)] io::Error),
 
     /// cannot determine adapter name
     #[cfg(windows)]
     #[error(display = "Failed to determine alias of Wintun adapter")]
     WintunFindAlias(#[error(source)] io::Error),
-
-    /// cannot delete wintun interface
-    #[cfg(windows)]
-    #[error(display = "Failed to delete existing Wintun adapter")]
-    WintunDeleteExistingError(#[error(source)] io::Error),
-
-    /// Error while waiting for IP interfaces to become available
-    #[cfg(windows)]
-    #[error(display = "Failed while waiting for IP interfaces")]
-    IpInterfacesError(#[error(source)] io::Error),
-
-    /// Error returned from `ConvertInterfaceAliasToLuid`
-    #[cfg(windows)]
-    #[error(display = "Cannot find LUID for virtual adapter")]
-    NoDeviceLuid(#[error(source)] io::Error),
-
-    /// Error returned from `GetUnicastIpAddressTable`/`GetUnicastIpAddressEntry`
-    #[cfg(windows)]
-    #[error(display = "Cannot find LUID for virtual adapter")]
-    ObtainUnicastAddress(#[error(source)] io::Error),
-
-    /// `GetUnicastIpAddressTable` contained no addresses for the tunnel interface
-    #[cfg(windows)]
-    #[error(display = "Found no addresses for virtual adapter")]
-    NoUnicastAddress,
-
-    /// Unexpected DAD state returned for a unicast address
-    #[cfg(windows)]
-    #[error(display = "Unexpected DAD state")]
-    DadStateError(#[error(source)] DadStateError),
-
-    /// DAD check failed.
-    #[cfg(windows)]
-    #[error(display = "Timed out waiting on tunnel device")]
-    DeviceReadyTimeout,
 
     /// OpenVPN process died unexpectedly
     #[error(display = "OpenVPN process died unexpectedly")]
@@ -209,11 +138,6 @@ pub enum Error {
         _0
     )]
     ProxyExited(String),
-
-    /// Failure in Windows syscall.
-    #[cfg(windows)]
-    #[error(display = "Failure in Windows syscall")]
-    WinnetError(#[error(source)] crate::winnet::Error),
 
     /// The map is missing 'dev'
     #[cfg(target_os = "linux")]
@@ -273,7 +197,7 @@ pub struct OpenVpnMonitor<C: OpenVpnBuilder = OpenVpnCommand> {
     server_join_handle: Option<task::JoinHandle<std::result::Result<(), event_server::Error>>>,
 
     #[cfg(windows)]
-    wintun: Arc<Box<dyn WintunContext>>,
+    _wintun: Arc<Box<dyn WintunContext>>,
 }
 
 #[cfg(windows)]
@@ -282,6 +206,7 @@ trait WintunContext: Send + Sync {
     fn luid(&self) -> NET_LUID;
     fn ipv6(&self) -> bool;
     async fn wait_for_interfaces(&self) -> io::Result<()>;
+    fn disable_unused_features(&self) {}
 }
 
 #[cfg(windows)]
@@ -299,9 +224,9 @@ impl std::fmt::Debug for dyn WintunContext {
 #[cfg(windows)]
 #[derive(Debug)]
 struct WintunContextImpl {
-    adapter: windows::TemporaryWintunAdapter,
+    adapter: wintun::TemporaryWintunAdapter,
     wait_v6_interface: bool,
-    _logger: windows::WintunLoggerHandle,
+    _logger: wintun::WintunLoggerHandle,
 }
 
 #[cfg(windows)]
@@ -317,7 +242,11 @@ impl WintunContext for WintunContextImpl {
 
     async fn wait_for_interfaces(&self) -> io::Result<()> {
         let luid = self.adapter.adapter().luid();
-        super::windows::wait_for_interfaces(luid, true, self.wait_v6_interface).await
+        crate::windows::wait_for_interfaces(luid, true, self.wait_v6_interface).await
+    }
+
+    fn disable_unused_features(&self) {
+        self.adapter.adapter().try_disable_unused_features();
     }
 }
 
@@ -364,79 +293,18 @@ impl OpenVpnMonitor<OpenVpnCommand> {
         let proxy_monitor = Self::start_proxy(&params.proxy, &proxy_resources)?;
 
         #[cfg(windows)]
-        let dll = get_wintun_dll(resource_dir)?;
+        let dll = wintun::WintunDll::instance(resource_dir).map_err(Error::WintunDllError)?;
         #[cfg(windows)]
         let wintun_logger = dll.activate_logging();
 
         #[cfg(windows)]
-        let wintun_adapter = {
-            {
-                if let Ok(adapter) =
-                    windows::WintunAdapter::open(dll.clone(), &*ADAPTER_ALIAS, &*ADAPTER_POOL)
-                {
-                    // Delete existing adapter in case it has residual config
-                    adapter
-                        .delete(false)
-                        .map_err(Error::WintunDeleteExistingError)?;
-                }
-            }
-
-            let (adapter, reboot_required) = windows::TemporaryWintunAdapter::create(
-                dll.clone(),
-                &*ADAPTER_ALIAS,
-                &*ADAPTER_POOL,
-                Some(ADAPTER_GUID.clone()),
-            )
-            .map_err(Error::WintunError)?;
-
-            if reboot_required {
-                log::warn!("You may need to restart Windows to complete the install of Wintun");
-            }
-
-            let assigned_guid = adapter.adapter().guid();
-            let assigned_guid = assigned_guid.as_ref().unwrap_or_else(|error| {
-                log::error!(
-                    "{}",
-                    error.display_chain_with_msg("Cannot identify adapter guid")
-                );
-                &ADAPTER_GUID
-            });
-            let assigned_guid_string = windows::string_from_guid(assigned_guid);
-
-            // Workaround: OpenVPN looks up "ComponentId" to identify tunnel devices.
-            // If Wintun fails to create this registry value, create it here.
-            let adapter_key =
-                windows::find_adapter_registry_key(&assigned_guid_string, KEY_READ | KEY_WRITE);
-            match adapter_key {
-                Ok(adapter_key) => {
-                    let component_id: io::Result<String> = adapter_key.get_value("ComponentId");
-                    match component_id {
-                        Ok(_) => (),
-                        Err(error) => {
-                            if error.kind() == io::ErrorKind::NotFound {
-                                if let Err(error) = adapter_key.set_value("ComponentId", &"wintun")
-                                {
-                                    log::error!(
-                                        "{}",
-                                        error.display_chain_with_msg(
-                                            "Failed to set ComponentId registry value"
-                                        )
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    log::error!(
-                        "{}",
-                        error.display_chain_with_msg("Failed to find network adapter registry key")
-                    );
-                }
-            }
-
-            adapter
-        };
+        let (wintun_adapter, _reboot_required) = wintun::TemporaryWintunAdapter::create(
+            dll.clone(),
+            &*ADAPTER_ALIAS,
+            &*ADAPTER_POOL,
+            Some(ADAPTER_GUID.clone()),
+        )
+        .map_err(Error::WintunCreateAdapterError)?;
 
         #[cfg(windows)]
         let adapter_alias = wintun_adapter
@@ -575,7 +443,7 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
             server_join_handle: Some(server_join_handle),
 
             #[cfg(windows)]
-            wintun,
+            _wintun: wintun,
         })
     }
 
@@ -587,6 +455,7 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
         {
             log::debug!("Wait for IP interfaces");
             wintun.wait_for_interfaces().await?;
+            wintun.disable_unused_features();
         }
         cmd.start()
     }
@@ -1061,15 +930,18 @@ mod event_server {
             #[cfg(windows)]
             {
                 let tunnel_device = metadata.interface.clone();
-                tokio::task::spawn_blocking(move || super::wait_for_ready_device(&tunnel_device))
+                let luid = crate::windows::luid_from_alias(tunnel_device).map_err(|error| {
+                    log::error!("{}", error.display_chain_with_msg("luid_from_alias failed"));
+                    tonic::Status::unavailable("failed to obtain interface luid")
+                })?;
+                crate::windows::wait_for_addresses(luid)
                     .await
-                    .map_err(|_| tonic::Status::internal("task failed to complete"))?
                     .map_err(|error| {
                         log::error!(
                             "{}",
-                            error.display_chain_with_msg("wait_for_ready_device failed")
+                            error.display_chain_with_msg("wait_for_addresses failed")
                         );
-                        tonic::Status::unavailable("wait_for_ready_device failed")
+                        tonic::Status::unavailable("wait_for_addresses failed")
                     })?;
             }
 
@@ -1234,114 +1106,6 @@ mod event_server {
             cx: &mut Context<'_>,
         ) -> Poll<std::io::Result<()>> {
             Pin::new(&mut self.0).poll_shutdown(cx)
-        }
-    }
-}
-
-#[cfg(windows)]
-fn wait_for_ready_device(alias: &str) -> Result<()> {
-    // Obtain luid for alias
-    let alias_wide: Vec<u16> = OsStr::new(alias)
-        .encode_wide()
-        .chain(std::iter::once(0u16))
-        .collect();
-
-    let mut luid: NET_LUID = unsafe { std::mem::zeroed() };
-    let status = unsafe { ConvertInterfaceAliasToLuid(alias_wide.as_ptr(), &mut luid) };
-    if status != NO_ERROR {
-        return Err(Error::NoDeviceLuid(io::Error::last_os_error()));
-    }
-
-    // Obtain unicast IP addresses
-    let mut unicast_rows = vec![];
-
-    unsafe {
-        let mut unicast_table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-
-        let status = GetUnicastIpAddressTable(AF_UNSPEC as u16, &mut unicast_table);
-        if status != NO_ERROR {
-            return Err(Error::ObtainUnicastAddress(io::Error::last_os_error()));
-        }
-
-        if (*unicast_table).NumEntries == 0 {
-            FreeMibTable(unicast_table as *mut _);
-            return Err(Error::NoUnicastAddress);
-        }
-
-        let first_row = &(*unicast_table).Table[0] as *const MIB_UNICASTIPADDRESS_ROW;
-
-        for i in 0..(*unicast_table).NumEntries {
-            let row = first_row.offset(i as isize);
-            if (*row).InterfaceLuid.Value != luid.Value {
-                continue;
-            }
-            unicast_rows.push(*row);
-        }
-
-        FreeMibTable(unicast_table as *mut _);
-    }
-
-    // Poll DAD status using GetUnicastIpAddressEntry
-    // https://docs.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-createunicastipaddressentry
-
-    let deadline = Instant::now() + DEVICE_READY_TIMEOUT;
-    while Instant::now() < deadline {
-        let mut ready = true;
-
-        for row in &mut unicast_rows {
-            let status = unsafe { GetUnicastIpAddressEntry(row as *mut _) };
-            if status != NO_ERROR {
-                return Err(Error::ObtainUnicastAddress(io::Error::last_os_error()));
-            }
-            if row.DadState == IpDadStateTentative {
-                ready = false;
-                break;
-            }
-            if row.DadState != IpDadStatePreferred {
-                return Err(Error::DadStateError(DadStateError::from(row.DadState)));
-            }
-        }
-
-        if ready {
-            return Ok(());
-        }
-        std::thread::sleep(DEVICE_CHECK_INTERVAL);
-    }
-
-    Err(Error::DeviceReadyTimeout)
-}
-
-/// Handles cases where there DAD state is neither tentative nor preferred.
-#[cfg(windows)]
-#[derive(err_derive::Error, Debug)]
-pub enum DadStateError {
-    /// Invalid DAD state.
-    #[error(display = "Invalid DAD state")]
-    Invalid,
-
-    /// Duplicate unicast address.
-    #[error(display = "A duplicate IP address was detected")]
-    Duplicate,
-
-    /// Deprecated unicast address.
-    #[error(display = "The IP address has been deprecated")]
-    Deprecated,
-
-    /// Unknown DAD state constant.
-    #[error(display = "Unknown DAD state: {}", _0)]
-    Unknown(u32),
-}
-
-#[cfg(windows)]
-#[allow(non_upper_case_globals)]
-impl From<NL_DAD_STATE> for DadStateError {
-    fn from(state: NL_DAD_STATE) -> DadStateError {
-        use winapi::shared::nldef::*;
-        match state {
-            IpDadStateInvalid => DadStateError::Invalid,
-            IpDadStateDuplicate => DadStateError::Duplicate,
-            IpDadStateDeprecated => DadStateError::Deprecated,
-            other => DadStateError::Unknown(other),
         }
     }
 }
