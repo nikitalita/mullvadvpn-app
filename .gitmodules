@@ -1,6 +1,7 @@
 [submodule "dist-assets/binaries"]
 	path = dist-assets/binaries
 	url = https://github.com/nikitalita/mullvadvpn-app-binaries
+	branch = arm64-test
 [submodule "windows/libwfp"]
 	path = windows/libwfp
 	url = https://github.com/mullvad/libwfp
